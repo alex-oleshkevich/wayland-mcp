@@ -402,7 +402,7 @@ impl Server {
             Err(e) => {
                 if !e.contains("not advertised") || target.kind == "sandbox" { return Err(err(e)); }
                 if !crate::portal_session::portal_enabled() {
-                    return Err(err(format!("{e}. Portal capture is available but not enabled: set WAYLAND_MCP_PORTAL=1 to opt into an explicitly consented ScreenCast session (a dialog will ask the user). No other capture mechanism will be substituted.")));
+                    return Err(err(format!("{e}. Portal capture is available but not enabled: start the server with --portal (or WAYLAND_MCP_PORTAL=1) to opt into an explicitly consented ScreenCast session (a dialog will ask the user). No other capture mechanism will be substituted.")));
                 }
                 // Portal capture path: establishment may wait on the consent
                 // dialog, so it runs on a blocking thread, not a tokio worker.
@@ -461,8 +461,8 @@ impl Server {
     /// Convert a logical point to configured touchscreen device coordinates, verifying it lands on the mapped output.
     pub fn touch_point(&self, target: &crate::wayland::TargetSpec, lx: f64, ly: f64) -> Result<(crate::touch::TouchDevice, i32, i32), ErrorData> {
         let mapping_desc = crate::portal::touch_mapping(&target.kind).map_err(err)?;
-        // touch_mapping returns either an error or a description; the machine-readable mapping comes from the same env var.
-        let cfg = std::env::var("WAYLAND_MCP_TOUCH_UINPUT").map_err(|_| err(mapping_desc.clone()))?;
+        // touch_mapping returns either an error or a description; the machine-readable mapping is the same configured value.
+        let cfg = crate::config::get().touch_uinput.clone().ok_or_else(|| err(mapping_desc.clone()))?;
         let mapping = crate::touch::parse_mapping(&cfg).map_err(err)?;
         let (outputs, _, _) = self.layout(target)?;
         let out = outputs.iter().find(|o| o.name == mapping.output).ok_or_else(|| err(format!("touch mapping output '{}' not present on target; mapping not verified", mapping.output)))?;
@@ -527,7 +527,7 @@ impl Server {
     }
     /// Show the activity indicator for a dispatched action (best-effort; unavailable is reported by doctor, never faked).
     pub fn indicator_show(&self, action: &serde_json::Value, target_id: Option<&str>) {
-        if std::env::var("WAYLAND_MCP_INDICATOR").map(|v| v == "0").unwrap_or(false) { return; }
+        if !crate::config::get().indicator { return; }
         // A recording that asked for no indicator (include_indicator:false)
         // must not have one drawn into its frames.
         if !self.record_no_indicator.lock().unwrap().is_empty() { return; }

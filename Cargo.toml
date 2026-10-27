@@ -27,7 +27,7 @@ serde_json = "1"
 schemars = "1"
 anyhow = "1"
 thiserror = "2"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 image = { version = "0.25", features = ["png", "jpeg"] }
 base64 = "0.22"
 regex = "1"

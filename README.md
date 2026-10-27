@@ -92,32 +92,40 @@ For clients that use an `mcpServers` JSON file:
   "mcpServers": {
     "wayland-mcp": {
       "command": "/path/to/wayland-mcp/target/release/wayland-mcp",
-      "env": { "WAYLAND_MCP_PORTAL": "1" }
+      "args": ["--portal"]
     }
   }
 }
 ```
 
-Leave out `WAYLAND_MCP_PORTAL` unless you're on GNOME or KDE and want the agent
-to control your real desktop.
+Leave out `--portal` unless you're on GNOME or KDE and want the agent to
+control your real desktop.
 
-To expose only some tools, pass `--tools` or `--exclude-tools`. An unknown name
-stops the server at startup.
+Options:
+
+| Flag | Effect |
+|---|---|
+| `--portal` | Allows the screen-sharing portal (needed for GNOME and KDE). Off by default, and never used for sandboxes. |
+| `--portal-timeout-ms <MS>` | How long to wait for you to answer the consent dialog, 1000 to 600000. Default 150000. If time runs out, the request is cancelled and the dialog closes. |
+| `--touch-uinput <MAPPING>` | Maps a touchscreen device for touch input, as `/dev/input/eventN:WIDTHxHEIGHT@OUTPUT`. |
+| `--ocr-dir <DIR>` | Where the OCR models live. Defaults to `$XDG_CACHE_HOME/ocrs`. |
+| `--no-indicator` | Turns off the on-screen overlay that shows what the agent is doing. |
+| `--tools <A,B>` | Exposes only these tools. |
+| `--exclude-tools <A,B>` | Hides these tools. |
+
+A misspelled tool name or an invalid value stops the server at startup.
 
 ```bash
 wayland-mcp --tools doctor,screenshot,desktop_info
 wayland-mcp --exclude-tools record_start,dbus_call
 ```
 
-Environment variables:
-
-| Variable | Effect |
-|---|---|
-| `WAYLAND_MCP_PORTAL=1` | Allows the screen-sharing portal (needed for GNOME and KDE). Off by default, and never used for sandboxes. |
-| `WAYLAND_MCP_PORTAL_TIMEOUT_MS` | How long to wait for you to answer the consent dialog. Default 150000. If time runs out, the request is cancelled and the dialog closes. |
-| `WAYLAND_MCP_TOUCH_UINPUT` | Maps a touchscreen device for touch input, as `/dev/input/eventN:WIDTHxHEIGHT@OUTPUT`. |
-| `WAYLAND_MCP_OCR_DIR` | Where the OCR models live. Defaults to `$XDG_CACHE_HOME/ocrs`. |
-| `WAYLAND_MCP_INDICATOR=0` | Turns off the on-screen overlay that shows what the agent is doing. |
+Each option except the tool filters can also come from an environment
+variable: `WAYLAND_MCP_PORTAL`, `WAYLAND_MCP_PORTAL_TIMEOUT_MS`,
+`WAYLAND_MCP_TOUCH_UINPUT`, `WAYLAND_MCP_OCR_DIR` and
+`WAYLAND_MCP_NO_INDICATOR`. The two on/off ones take `1`/`0` (or
+`true`/`false`, `yes`/`no`). A flag on the command line wins over its
+variable. `wayland-mcp --help` lists everything.
 
 ## Usage
 

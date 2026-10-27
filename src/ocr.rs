@@ -1,4 +1,4 @@
-//! CPU OCR via ocrs. Models live in $WAYLAND_MCP_OCR_DIR or $XDG_CACHE_HOME/ocrs
+//! CPU OCR via ocrs. Models live in --ocr-dir or $XDG_CACHE_HOME/ocrs
 //! (text-detection.rten / text-recognition.rten). They are downloaded ONLY on an OCR
 //! request that opts into downloading; `doctor` never triggers this.
 use image::RgbaImage;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 pub struct OcrWord { pub text: String, pub box_px: [u32; 4], pub center_px: [f64; 2] }
 
 pub fn model_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("WAYLAND_MCP_OCR_DIR") { return PathBuf::from(d); }
+    if let Some(d) = &crate::config::get().ocr_dir { return d.clone(); }
     let cache = std::env::var("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache"));
     cache.join("ocrs")
 }
@@ -19,7 +19,7 @@ pub fn ensure_models(download: bool) -> Result<(PathBuf, PathBuf), String> {
     let (det, rec) = model_paths();
     if det.exists() && rec.exists() { return Ok((det, rec)); }
     if !download {
-        return Err(format!("OCR models not installed at {} (missing {}). Re-run with download_models:true to fetch them from the ocrs model host, or set WAYLAND_MCP_OCR_DIR to a directory containing text-detection.rten and text-recognition.rten. The bundled ocrs alphabet covers Latin scripts; other scripts need a matching custom model/alphabet.", model_dir().display(),
+        return Err(format!("OCR models not installed at {} (missing {}). Re-run with download_models:true to fetch them from the ocrs model host, or start the server with --ocr-dir pointing at a directory containing text-detection.rten and text-recognition.rten. The bundled ocrs alphabet covers Latin scripts; other scripts need a matching custom model/alphabet.", model_dir().display(),
             [(!det.exists()).then_some("text-detection.rten"), (!rec.exists()).then_some("text-recognition.rten")].into_iter().flatten().collect::<Vec<_>>().join(", ")));
     }
     std::fs::create_dir_all(model_dir()).map_err(|e| format!("create OCR model dir: {e}"))?;

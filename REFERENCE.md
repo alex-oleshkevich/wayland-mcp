@@ -85,7 +85,7 @@ observation fails, both facts are reported and nothing is replayed.
   identify the reader, so reads in the first 250 ms (eager clipboard managers
   such as Klipper) are excluded, and a manager that reads later can still
   yield a false `true`. Verified on KDE with Klipper running.
-- OCR (`ocrs`, CPU) models live in `$WAYLAND_MCP_OCR_DIR` or
+- OCR (`ocrs`, CPU) models live in `--ocr-dir` or
   `$XDG_CACHE_HOME/ocrs`; they are downloaded only by an OCR call with
   `download_models:true`. The bundled alphabet covers Latin scripts.
 
@@ -99,9 +99,9 @@ Commands and per-area coverage: [TESTING.md](TESTING.md).
 |---|---|
 | niri host + nested niri sandbox, GTK fixture | verified (below) |
 | GNOME VM guest (mutter), no consent | verified: not-enabled guidance, nothing captured or injected |
-| GNOME VM guest, portal consent (`WAYLAND_MCP_PORTAL=1`) | verified: capture, click, ASCII type_text, touch, portal clipboard (text read/write, external paste, external copy read) |
+| GNOME VM guest, portal consent (`--portal`) | verified: capture, click, ASCII type_text, touch, portal clipboard (text read/write, external paste, external copy read) |
 | KDE Plasma 6.8.1 VM guest (KWin), no consent | verified: not-enabled guidance, nothing captured or injected |
-| KDE Plasma 6.8.1 VM guest, portal consent (`WAYLAND_MCP_PORTAL=1`) | verified: capture, keyboard/ASCII type_text, `touch_tap`, `touch_swipe`, `touch_pinch`, pointer click (Qt app and GTK4 fixture), native ext-data-control clipboard, Cancel terminal, orphan-timeout cleanup |
+| KDE Plasma 6.8.1 VM guest, portal consent (`--portal`) | verified: capture, keyboard/ASCII type_text, `touch_tap`, `touch_swipe`, `touch_pinch`, pointer click (Qt app and GTK4 fixture), native ext-data-control clipboard, Cancel terminal, orphan-timeout cleanup |
 | Physical host touchscreen | host hardware unvalidated; the evdev touch backend is verified in a VM (niri, virtio-multitouch): tap/swipe/pinch pass, bogus-mapping refusals pass |
 | Quarter-turn output transforms | verified: all 8 `wl_output` transform codes (0-7) read upright on niri/virtio-gpu; flipped quarter-turns compose flip then rotate |
 
@@ -141,7 +141,7 @@ niri host + sandbox:
 GNOME limits (explicit errors, not faked):
 
 - Native screencopy, virtual pointer, virtual keyboard and layer-shell are
-  unavailable. Without `WAYLAND_MCP_PORTAL=1`, screenshot and click return
+  unavailable. Without `--portal`, screenshot and click return
   not-enabled guidance and nothing is captured or injected.
 - Clicking Cancel in the consent dialog is terminal. There is no fallback.
 - One consent covers capture, input and touch.
@@ -163,7 +163,7 @@ GNOME limits (explicit errors, not faked):
   refusing clipboard-assisted paste/copy rather than risk destroying non-text
   clipboard data (use type_text mode='keys', or an explicit clipboard_write)".
 - Backend order: wlr data-control, ext data-control, portal (portal only with
-  `WAYLAND_MCP_PORTAL=1`, never in the sandbox).
+  `--portal`, never in the sandbox).
 - Indicator reports unavailable (no layer-shell).
 
 `touch_tap` and `touch_swipe` drive the fixture's drag gesture through the
@@ -172,7 +172,7 @@ GNOME portal (touchscreen granted by RemoteDesktop alone).
 KDE Plasma / KWin 6.8.1 facts (explicit errors, not faked):
 
 - KWin advertises no `zwlr_screencopy`, virtual-pointer or virtual-keyboard
-  globals; layer-shell is available. Without `WAYLAND_MCP_PORTAL=1`, screenshot
+  globals; layer-shell is available. Without `--portal`, screenshot
   and click return not-enabled guidance.
 - The portal dialog is a single "Remote Control Requested" Allow/Deny prompt
   with no output picker. Deny is terminal; there is no fallback.

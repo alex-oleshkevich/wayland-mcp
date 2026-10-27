@@ -38,10 +38,9 @@ pub fn touch_mapping(target_kind: &str) -> Result<String, String> {
     if target_kind == "sandbox" {
         return Err("touch on the private niri target is unsupported: no target-scoped touch backend is available, and host uinput events are never injected into an isolated target".into());
     }
-    if let Ok(cfg) = std::env::var("WAYLAND_MCP_TOUCH_UINPUT") {
-        // cfg format: /dev/input/eventN:WIDTHxHEIGHT@OUTPUT — mapping must be verified by the operator.
-        if cfg.contains(':') { return Ok(format!("configured uinput touchscreen mapping: {cfg}")); }
-        return Err(format!("WAYLAND_MCP_TOUCH_UINPUT='{cfg}' is not a verified mapping (expected /dev/input/eventN:WIDTHxHEIGHT@OUTPUT); refusing best-effort touch"));
+    if let Some(cfg) = &crate::config::get().touch_uinput {
+        // Format already validated at startup: /dev/input/eventN:WIDTHxHEIGHT@OUTPUT.
+        return Ok(format!("configured uinput touchscreen mapping: {cfg}"));
     }
-    Err("touch unsupported on this target: no granted portal touch capability and no explicitly configured, verified uinput touchscreen mapping (WAYLAND_MCP_TOUCH_UINPUT). Synthetic touch is not a touchpad gesture and is never faked via pointer events.".into())
+    Err("touch unsupported on this target: no granted portal touch capability and no explicitly configured, verified uinput touchscreen mapping (--touch-uinput). Synthetic touch is not a touchpad gesture and is never faked via pointer events.".into())
 }

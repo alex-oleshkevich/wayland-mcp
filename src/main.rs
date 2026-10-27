@@ -30,6 +30,8 @@ mod state;
 mod wayland;
 #[cfg(target_os = "linux")]
 mod touch;
+#[cfg(target_os = "linux")]
+mod config;
 
 #[cfg(target_os = "linux")]
 use clap::Parser;
@@ -57,12 +59,44 @@ struct Cli {
     /// Comma-separated exact tool names to exclude (unknown names fail startup).
     #[arg(long, value_delimiter = ',', default_value = "")]
     exclude_tools: Vec<String>,
+    /// Allow the screen-sharing portal (needed on GNOME and KDE). A consent
+    /// dialog asks before anything is captured or injected. Never used for
+    /// sandbox targets.
+    #[arg(long, env = "WAYLAND_MCP_PORTAL", value_parser = clap::builder::BoolishValueParser::new())]
+    portal: bool,
+    /// How long to wait for the portal consent dialog before cancelling the
+    /// request and closing the dialog.
+    #[arg(long, env = "WAYLAND_MCP_PORTAL_TIMEOUT_MS", default_value_t = 150_000, value_name = "MS",
+          value_parser = clap::value_parser!(u64).range(1_000..=600_000))]
+    portal_timeout_ms: u64,
+    /// Touchscreen device for touch input when the portal grants none:
+    /// /dev/input/eventN:WIDTHxHEIGHT@OUTPUT.
+    #[arg(long, env = "WAYLAND_MCP_TOUCH_UINPUT", value_name = "MAPPING", value_parser = parse_touch_mapping)]
+    touch_uinput: Option<String>,
+    /// Directory with the OCR models (default: $XDG_CACHE_HOME/ocrs).
+    #[arg(long, env = "WAYLAND_MCP_OCR_DIR", value_name = "DIR")]
+    ocr_dir: Option<std::path::PathBuf>,
+    /// Do not draw the on-screen overlay that shows what the agent is doing.
+    #[arg(long, env = "WAYLAND_MCP_NO_INDICATOR", value_parser = clap::builder::BoolishValueParser::new())]
+    no_indicator: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn parse_touch_mapping(s: &str) -> Result<String, String> {
+    touch::parse_mapping(s).map(|_| s.to_string())
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    config::init(config::Config {
+        portal: cli.portal,
+        portal_timeout_ms: cli.portal_timeout_ms,
+        touch_uinput: cli.touch_uinput,
+        ocr_dir: cli.ocr_dir,
+        indicator: !cli.no_indicator,
+    });
     let exclude: Vec<String> = cli.exclude_tools.into_iter().filter(|s| !s.is_empty()).collect();
     let include: Option<Vec<String>> = cli.tools.map(|v| v.into_iter().filter(|s| !s.is_empty()).collect());
     let session = Arc::new(Mutex::new(Session::new()));
@@ -109,4 +143,26 @@ async fn main() -> anyhow::Result<()> {
 fn main() {
     eprintln!("wayland-mcp requires Linux with a Wayland session; this platform is not supported");
     std::process::exit(1);
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod cli_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    /// On/off options read `1`/`0` from their variables, and a flag beats its variable.
+    #[test]
+    fn bool_options_from_env_and_flags() {
+        std::env::remove_var("WAYLAND_MCP_NO_INDICATOR");
+        std::env::set_var("WAYLAND_MCP_PORTAL", "0");
+        assert!(!Cli::try_parse_from(["wayland-mcp"]).unwrap().portal);
+        assert!(Cli::try_parse_from(["wayland-mcp", "--portal"]).unwrap().portal);
+        std::env::set_var("WAYLAND_MCP_PORTAL", "1");
+        assert!(Cli::try_parse_from(["wayland-mcp"]).unwrap().portal);
+        std::env::set_var("WAYLAND_MCP_PORTAL", "bogus");
+        assert!(Cli::try_parse_from(["wayland-mcp"]).is_err());
+        std::env::remove_var("WAYLAND_MCP_PORTAL");
+        assert!(!Cli::try_parse_from(["wayland-mcp"]).unwrap().portal);
+        assert!(Cli::try_parse_from(["wayland-mcp", "--no-indicator"]).unwrap().no_indicator);
+    }
 }

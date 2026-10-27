@@ -60,10 +60,10 @@ Used to validate the portal path on mutter. Summary only:
 
 1. Arch guest under QEMU with GNOME and the GTK fixture installed.
 2. Reach the guest over SSH with the key in `.vmtest/` (`vmkey`).
-3. Start the server in the guest session with `WAYLAND_MCP_PORTAL=1`.
+3. Start the server in the guest session with `--portal`.
 4. Grant consent through the QEMU monitor when the portal dialog appears.
    One consent covers capture, input and touch.
-5. Without `WAYLAND_MCP_PORTAL=1`, expect not-enabled guidance and no capture
+5. Without `--portal`, expect not-enabled guidance and no capture
    or injection. Cancelling the dialog is terminal.
 
 The same procedure was repeated on a KDE Plasma 6.8.1 guest (GDM kept, session
@@ -101,7 +101,7 @@ switched via AccountsService). KWin's dialog is a single Allow/Deny prompt.
 
 ## OCR models
 
-`ocrs` runs on CPU. Models live in `$WAYLAND_MCP_OCR_DIR` or
+`ocrs` runs on CPU. Models live in `--ocr-dir` or
 `$XDG_CACHE_HOME/ocrs` (default `~/.cache/ocrs`). They download only on an OCR
 call with `download_models:true`.
 

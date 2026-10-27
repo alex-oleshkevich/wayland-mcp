@@ -1,5 +1,5 @@
 //! Consented portal session actor: one RemoteDesktop+ScreenCast session (created
-//! only when the operator opted in with WAYLAND_MCP_PORTAL=1), PipeWire frame
+//! only when the operator opted in with --portal), PipeWire frame
 //! capture, and RemoteDesktop notify input. A consent refusal/cancel from the
 //! portal is terminal for the triggering request — it is never routed around
 //! via uinput or any other mechanism, and never retried automatically.
@@ -52,14 +52,14 @@ pub struct PortalHandle {
 type Frames = Arc<Mutex<HashMap<u32, (u64, Instant, Result<PortalFrame, String>)>>>;
 type Dead = Arc<Mutex<Option<String>>>;
 
-pub fn portal_enabled() -> bool { std::env::var("WAYLAND_MCP_PORTAL").map(|v| v == "1").unwrap_or(false) }
+pub fn portal_enabled() -> bool { crate::config::get().portal }
 
 impl PortalHandle {
     /// Establish the consented session. Blocks until the user answers the portal
     /// dialog (this is the explicit-consent point) or it times out.
     pub fn start(target: &TargetSpec) -> Result<Self, String> {
         if !portal_enabled() {
-            return Err("portal path not enabled: set WAYLAND_MCP_PORTAL=1 to opt into an explicitly consented RemoteDesktop/ScreenCast session. Refusing to bypass portal consent via any other mechanism.".into());
+            return Err("portal path not enabled: start the server with --portal (or WAYLAND_MCP_PORTAL=1) to opt into an explicitly consented RemoteDesktop/ScreenCast session. Refusing to bypass portal consent via any other mechanism.".into());
         }
         let (tx, rx) = mpsc::channel::<Cmd>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(Vec<StreamInfo>, String, Option<String>), String>>();
@@ -86,7 +86,7 @@ impl PortalHandle {
                 }
             });
         }).map_err(|e| format!("spawn portal actor: {e}"))?;
-        let timeout_ms = std::env::var("WAYLAND_MCP_PORTAL_TIMEOUT_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(150_000).clamp(1_000, 600_000);
+        let timeout_ms = crate::config::get().portal_timeout_ms;
         let (streams, devices, clipboard_unavailable) = match ready_rx.recv_timeout(Duration::from_millis(timeout_ms)) {
             Ok(r) => r?,
             Err(mpsc::RecvTimeoutError::Timeout) => {
