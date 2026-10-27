@@ -664,12 +664,20 @@ impl Server {
         Ok(Self { session, inputs: Arc::new(Mutex::new(HashMap::new())), clipboards: Arc::new(Mutex::new(HashMap::new())), sandboxes: Arc::new(Mutex::new(HashMap::new())), apps: Arc::new(Mutex::new(HashMap::new())), counters: Arc::new(Mutex::new((0, 0))), trace: Arc::new(Mutex::new(None)), recordings: Arc::new(Mutex::new(HashMap::new())), indicator: Arc::new(Mutex::new(None)), portals: Arc::new(Mutex::new(HashMap::new())), tool_router: router, input_creation: Arc::new(Mutex::new(HashMap::new())), portal_creation: Arc::new(Mutex::new(HashMap::new())), record_no_indicator: Arc::new(Mutex::new(std::collections::HashSet::new())) })
     }
 
-    /// Structured read-only diagnostics. Never prompts for consent, downloads models, or changes settings.
-    #[tool(description = "Read-only capability diagnostics for the selected target and host tools", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
-    async fn doctor(&self) -> Result<CallToolResult, ErrorData> {
+    /// Name and description of every tool left after --tools/--exclude-tools.
+    pub fn tool_list(&self) -> Vec<(String, String)> {
+        let mut tools: Vec<(String, String)> = self.tool_router.list_all().iter()
+            .map(|t| (t.name.to_string(), t.description.as_deref().unwrap_or("").to_string()))
+            .collect();
+        tools.sort();
+        tools
+    }
+
+    /// Read-only diagnostics shared by the `doctor` tool and `wayland-mcp doctor`.
+    pub async fn doctor_report(&self) -> Result<serde_json::Value, String> {
         // Clone the target and drop the session lock before the Wayland
         // roundtrip: a hung compositor must not block every other tool.
-        let target = { self.session.lock().unwrap().target(None).map_err(err)? };
+        let target = { self.session.lock().unwrap().target(None)? };
         let disc = wayland::discover(&target);
         let mut checks: Vec<DoctorCheck> = Vec::new();
         let mut push = |name: &str, status: &str, detail: serde_json::Value| checks.push(DoctorCheck { name: name.into(), status: status.into(), detail });
@@ -682,6 +690,8 @@ impl Server {
                 push("virtual_pointer", if has("zwlr_virtual_pointer_manager_v1") { "available" } else { "unavailable" }, serde_json::json!({}));
                 push("virtual_keyboard", if has("zwp_virtual_keyboard_manager_v1") { "available" } else { "unavailable" }, serde_json::json!({}));
                 push("layer_shell", if has("zwlr_layer_shell_v1") { "available" } else { "unavailable" }, serde_json::json!({"note": "activity indicator requires layer-shell"}));
+                let data_control = if has("zwlr_data_control_manager_v1") { Some("zwlr_data_control_manager_v1") } else if has("ext_data_control_manager_v1") { Some("ext_data_control_manager_v1") } else { None };
+                push("data_control", if data_control.is_some() { "available" } else { "unavailable" }, serde_json::json!({"protocol": data_control, "note": "without data-control the clipboard needs the portal (--portal)"}));
             }
             Err(e) => push("registry", "error", serde_json::json!({"error": e})),
         }
@@ -690,11 +700,19 @@ impl Server {
             push(bin, if ok { "available" } else { "missing" }, serde_json::json!({}));
         }
         push("uinput", if std::path::Path::new("/dev/uinput").exists() { "present-not-probed" } else { "absent" }, serde_json::json!({"note": "uinput is only used when explicitly configured with a verified mapping"}));
-        push("ocr_models", "not-checked", serde_json::json!({"note": "doctor never downloads models; OCR reports its own prerequisite on use"}));
+        let (det, rec) = crate::ocr::model_paths();
+        push("ocr_models", if det.exists() && rec.exists() { "installed" } else { "missing" }, serde_json::json!({"dir": crate::ocr::model_dir(), "note": "doctor never downloads models; an OCR call with download_models:true fetches them"}));
         push("accessibility", "not-checked", serde_json::json!({"note": "use a11y_enable/a11y_tree; doctor does not change desktop settings"}));
         let portal = crate::portal::probe(&target.session_bus).await;
-        checks.push(DoctorCheck { name: "portal".into(), status: if portal["available"].as_bool() == Some(true) { "probed".into() } else { "unavailable".into() }, detail: portal });
-        Ok(json_result(&serde_json::json!({"target": target.id, "checks": checks})))
+        push("portal", if portal["available"].as_bool() == Some(true) { "probed" } else { "unavailable" }, portal);
+        push("portal_enabled", if crate::portal_session::portal_enabled() { "yes" } else { "no" }, serde_json::json!({"note": "--portal opts into the consented screen-sharing portal"}));
+        Ok(serde_json::json!({"target": target.id, "checks": checks}))
+    }
+
+    /// Structured read-only diagnostics. Never prompts for consent, downloads models, or changes settings.
+    #[tool(description = "Read-only capability diagnostics for the selected target and host tools", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
+    async fn doctor(&self) -> Result<CallToolResult, ErrorData> {
+        Ok(json_result(&self.doctor_report().await.map_err(err)?))
     }
 
     /// Outputs, logical geometry, scales/transforms, active target and capability summary.

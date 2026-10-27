@@ -142,6 +142,17 @@ variable: `WAYLAND_MCP_PORTAL`, `WAYLAND_MCP_PORTAL_TIMEOUT_MS`,
 `true`/`false`, `yes`/`no`). A flag on the command line wins over its
 variable. `wayland-mcp --help` lists everything.
 
+Two subcommands help with setup. Both take the same options as the server.
+
+```bash
+wayland-mcp doctor          # what works on this desktop; --json for the raw report
+wayland-mcp tools           # tools a client would see; --names for names only
+wayland-mcp --exclude-tools record_start tools --names
+```
+
+`doctor` only reads: it never shows a consent dialog, downloads anything or
+changes settings. It exits 1 when it can't reach the Wayland session at all.
+
 ## Usage
 
 A typical session starts with `doctor` to see what works on this desktop. Then
