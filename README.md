@@ -142,16 +142,20 @@ variable: `WAYLAND_MCP_PORTAL`, `WAYLAND_MCP_PORTAL_TIMEOUT_MS`,
 `true`/`false`, `yes`/`no`). A flag on the command line wins over its
 variable. `wayland-mcp --help` lists everything.
 
-Two subcommands help with setup. Both take the same options as the server.
+Three subcommands help with setup and scripting. They take the same options as the server.
 
 ```bash
-wayland-mcp doctor          # what works on this desktop; --json for the raw report
+wayland-mcp doctor          # what works on this desktop (call doctor for raw JSON)
 wayland-mcp tools           # tools a client would see; --names for names only
 wayland-mcp --exclude-tools record_start tools --names
+wayland-mcp call wayland_globals '{"filter":"screencopy"}'
+wayland-mcp call screenshot '{"max_dimension":400}' -o shot.png
 ```
 
 `doctor` only reads: it never shows a consent dialog, downloads anything or
 changes settings. It exits 1 when it can't reach the Wayland session at all.
+
+`call` runs one tool through the normal MCP dispatch and prints the result (`-o FILE` saves the first image). Each call starts a fresh server, so sandboxes, shot ids and traces do not carry over between calls. The result goes to stdout and errors to stderr. It exits 1 when the call fails (unknown tool, invalid arguments, a tool error, or for `doctor` an unreachable Wayland session) and 2 when the argument is not a JSON object. Input tools such as `click` or `type_text` act on your real desktop, because a call always targets the host.
 
 ## Usage
 

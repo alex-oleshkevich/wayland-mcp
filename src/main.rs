@@ -89,16 +89,30 @@ struct Cli {
 enum Command {
     /// Check what works on this desktop (read-only; never prompts, downloads
     /// or changes settings). Exits 1 when the Wayland session is unreachable.
-    Doctor {
-        /// Print the raw JSON report instead of a table.
-        #[arg(long)]
-        json: bool,
-    },
+    Doctor,
     /// List the tools a client would see, after --tools/--exclude-tools.
     Tools {
         /// Print only the names, one per line.
         #[arg(long)]
         names: bool,
+    },
+    /// Run one tool through the real MCP dispatch and print the result.
+    ///
+    /// Starts a fresh in-process server for this call and shuts it down
+    /// afterwards, so state (sandboxes, shot ids, traces) does not carry over
+    /// between calls. The result goes to stdout; errors go to stderr. Exits 1
+    /// when the call fails (unknown tool, invalid arguments, tool error, or for
+    /// `doctor` an unreachable Wayland session) and 2 when JSON is not a JSON
+    /// object.
+    Call {
+        /// Tool name, as listed by `tools`.
+        tool: String,
+        /// Tool arguments as a JSON object.
+        #[arg(default_value = "{}")]
+        json: String,
+        /// Write the first image of the result to FILE.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
     },
 }
 
@@ -109,6 +123,121 @@ fn doctor_fatal(report: &serde_json::Value) -> bool {
         (c["name"].as_str(), c["status"].as_str()),
         (Some("wayland_socket"), Some("missing")) | (Some("registry"), Some("error"))
     )))
+}
+
+/// Run `tool` against a fresh in-process server over a duplex pipe, using a real
+/// rmcp client so filters, validation and errors match an external client.
+/// Output is buffered and written after cleanup, so a closed stdout pipe can't
+/// skip the cleanup. Returns the process exit code.
+#[cfg(target_os = "linux")]
+async fn run_call(
+    server: server::Server,
+    tool: String,
+    args: serde_json::Map<String, serde_json::Value>,
+    output: Option<std::path::PathBuf>,
+) -> anyhow::Result<i32> {
+    use base64::Engine;
+    use rmcp::model::{CallToolRequestParams, ContentBlock};
+    use std::fmt::Write as _;
+
+    let cleanup = server.clone();
+    // Ctrl-C / SIGTERM mid-call (e.g. during app_launch wait_ms) must still
+    // stop anything the call started. Cleanup may wait for an input action
+    // that holds its device (a long type_text or drag), so it runs off this
+    // task and a second signal exits at once, as in the server path.
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let cleanup = cleanup.clone();
+        let mut term = signal(SignalKind::terminate())?;
+        let mut int = signal(SignalKind::interrupt())?;
+        tokio::spawn(async move {
+            let code = tokio::select! { _ = term.recv() => 143, _ = int.recv() => 130 };
+            apps::begin_sandbox_shutdown();
+            let done = tokio::task::spawn_blocking(move || cleanup.shutdown_cleanup());
+            tokio::select! {
+                _ = done => {}
+                _ = term.recv() => { eprintln!("wayland-mcp: second termination signal, exiting immediately"); apps::kill_live_sandboxes_now(); }
+                _ = int.recv() => { eprintln!("wayland-mcp: second termination signal, exiting immediately"); apps::kill_live_sandboxes_now(); }
+            }
+            std::process::exit(code);
+        });
+    }
+    let (client_io, server_io) = tokio::io::duplex(MAX_REQUEST_LINE_BYTES);
+    let (sr, sw) = tokio::io::split(server_io);
+    let (cr, cw) = tokio::io::split(client_io);
+    let server_transport = AsyncRwTransport::new_server(sr, sw).with_max_line_length(MAX_REQUEST_LINE_BYTES);
+    let client_transport = AsyncRwTransport::new_client(cr, cw).with_max_line_length(MAX_REQUEST_LINE_BYTES);
+    let server_task = tokio::spawn(async move {
+        match server.serve(server_transport).await {
+            Ok(s) => { let _ = s.waiting().await; }
+            Err(e) => eprintln!("wayland-mcp: server failed to start: {e}"),
+        }
+    });
+    let is_doctor = tool == "doctor";
+    let mut params = CallToolRequestParams::new(tool);
+    params.arguments = Some(args);
+    let (mut out, mut err) = (String::new(), String::new());
+    let code = match ().serve(client_transport).await {
+        Err(e) => { let _ = writeln!(err, "error: {e}"); 1 }
+        Ok(client) => {
+            let res = client.call_tool(params).await;
+            let _ = client.cancel().await;
+            match res {
+                Err(e) => { let _ = writeln!(err, "error: {e}"); 1 }
+                Ok(result) => {
+                    let failed = result.is_error == Some(true);
+                    let mut code = i32::from(failed);
+                    let mut images = 0usize;
+                    for block in &result.content {
+                        match block {
+                            ContentBlock::Text(t) => {
+                                let text = match serde_json::from_str::<serde_json::Value>(&t.text) {
+                                    Ok(v) if v.is_object() || v.is_array() => {
+                                        if is_doctor && !failed && doctor_fatal(&v) { code = 1; }
+                                        serde_json::to_string_pretty(&v)?
+                                    }
+                                    _ => t.text.clone(),
+                                };
+                                // A tool error's text is the error message, not a result.
+                                let _ = if failed { writeln!(err, "error: {text}") } else { writeln!(out, "{text}") };
+                            }
+                            ContentBlock::Image(img) => {
+                                images += 1;
+                                let bytes = base64::engine::general_purpose::STANDARD.decode(&img.data);
+                                match (&output, bytes) {
+                                    (Some(path), Ok(b)) if images == 1 => match std::fs::write(path, &b) {
+                                        Ok(()) => { let _ = writeln!(err, "wrote {} ({}, {} bytes)", path.display(), img.mime_type, b.len()); }
+                                        Err(e) => { let _ = writeln!(err, "error: cannot write {}: {e}", path.display()); code = 1; }
+                                    },
+                                    (Some(_), Ok(_)) => {}
+                                    (Some(_), Err(e)) => { let _ = writeln!(err, "error: invalid image data: {e}"); code = 1; }
+                                    (None, Ok(b)) => { let _ = writeln!(err, "image ({}, {} bytes); use -o FILE to save it", img.mime_type, b.len()); }
+                                    (None, Err(e)) => { let _ = writeln!(err, "error: invalid image data: {e}"); code = 1; }
+                                }
+                            }
+                            other => { let _ = writeln!(out, "{}", serde_json::to_string_pretty(other)?); }
+                        }
+                    }
+                    if output.is_some() && images > 1 {
+                        let _ = writeln!(err, "skipped {} more image(s); only the first is written", images - 1);
+                    }
+                    if output.is_some() && images == 0 && !failed {
+                        let _ = writeln!(err, "error: result has no image to write");
+                        code = 1;
+                    }
+                    code
+                }
+            }
+        }
+    };
+    let _ = server_task.await;
+    apps::begin_sandbox_shutdown();
+    cleanup.shutdown_cleanup();
+    // Write errors (e.g. stdout piped into `head`) must not panic: cleanup is done.
+    use std::io::Write as _;
+    let _ = std::io::stdout().lock().write_all(out.as_bytes());
+    let _ = std::io::stderr().lock().write_all(err.as_bytes());
+    Ok(code)
 }
 
 /// Print the doctor report as an aligned table.
@@ -139,6 +268,15 @@ fn parse_touch_mapping(s: &str) -> Result<String, String> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Reject bad call arguments before anything starts.
+    let call_args = match &cli.command {
+        Some(Command::Call { json, .. }) => match serde_json::from_str::<serde_json::Value>(json) {
+            Ok(serde_json::Value::Object(m)) => Some(m),
+            Ok(_) => { eprintln!("error: call arguments must be a JSON object"); std::process::exit(2); }
+            Err(e) => { eprintln!("error: call arguments are not valid JSON: {e}"); std::process::exit(2); }
+        },
+        _ => None,
+    };
     config::init(config::Config {
         portal: cli.portal,
         portal_timeout_ms: cli.portal_timeout_ms,
@@ -163,14 +301,14 @@ async fn main() -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        Some(Command::Doctor { json }) => {
+        Some(Command::Doctor) => {
             let report = server.doctor_report().await.map_err(|e| anyhow::anyhow!(e))?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_doctor(&report);
-            }
+            print_doctor(&report);
             std::process::exit(i32::from(doctor_fatal(&report)));
+        }
+        Some(Command::Call { tool, output, .. }) => {
+            let code = run_call(server, tool, call_args.unwrap_or_default(), output).await?;
+            std::process::exit(code);
         }
         None => {}
     }
