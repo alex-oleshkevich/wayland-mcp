@@ -695,17 +695,46 @@ impl Server {
             }
             Err(e) => push("registry", "error", serde_json::json!({"error": e})),
         }
+        // Look the binaries up on PATH directly: `which` is not installed everywhere.
+        let path_var = std::env::var_os("PATH").unwrap_or_default();
         for bin in ["niri", "ffmpeg", "ffprobe"] {
-            let ok = std::process::Command::new("which").arg(bin).output().map(|o| o.status.success()).unwrap_or(false);
-            push(bin, if ok { "available" } else { "missing" }, serde_json::json!({}));
+            let found = std::env::split_paths(&path_var).map(|d| d.join(bin)).find(|p| {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            });
+            let used_for = match bin { "niri" => "sandbox targets", "ffmpeg" => "record_start", _ => "recording checks" };
+            match found {
+                Some(p) => push(bin, "available", serde_json::json!({"path": p})),
+                None => push(bin, "missing", serde_json::json!({"needed_for": used_for})),
+            }
         }
-        push("uinput", if std::path::Path::new("/dev/uinput").exists() { "present-not-probed" } else { "absent" }, serde_json::json!({"note": "uinput is only used when explicitly configured with a verified mapping"}));
+        // Touch fallback: the server writes to the configured evdev node
+        // (--touch-uinput), never to /dev/uinput. Checked with access(), not opened.
+        match &crate::config::get().touch_uinput {
+            None => push("touch_device", "not-configured", serde_json::json!({"note": "touch uses the portal when it grants a touchscreen; --touch-uinput sets a device fallback"})),
+            Some(cfg) => match crate::touch::parse_mapping(cfg) {
+                Err(e) => push("touch_device", "error", serde_json::json!({"mapping": cfg, "error": e})),
+                Ok(m) => {
+                    let c_path = std::ffi::CString::new(m.device.clone()).unwrap_or_default();
+                    // SAFETY: valid NUL-terminated path; access() only checks permissions.
+                    let writable = unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } == 0;
+                    let exists = std::path::Path::new(&m.device).exists();
+                    let output_present = disc.as_ref().ok().map(|d| d.outputs.iter().any(|o| o.name == m.output));
+                    let status = if !exists { "missing" } else if !writable { "no-permission" } else if output_present == Some(false) { "output-missing" } else { "available" };
+                    push("touch_device", status, serde_json::json!({"device": m.device, "output": m.output, "output_present": output_present}));
+                }
+            },
+        }
         let (det, rec) = crate::ocr::model_paths();
-        push("ocr_models", if det.exists() && rec.exists() { "installed" } else { "missing" }, serde_json::json!({"dir": crate::ocr::model_dir(), "note": "doctor never downloads models; an OCR call with download_models:true fetches them"}));
-        push("accessibility", "not-checked", serde_json::json!({"note": "use a11y_enable/a11y_tree; doctor does not change desktop settings"}));
-        let portal = crate::portal::probe(&target.session_bus).await;
-        push("portal", if portal["available"].as_bool() == Some(true) { "probed" } else { "unavailable" }, portal);
+        let non_empty = |p: &std::path::Path| std::fs::metadata(p).is_ok_and(|m| m.len() > 0);
+        push("ocr_models", if non_empty(&det) && non_empty(&rec) { "installed" } else { "missing" }, serde_json::json!({"dir": crate::ocr::model_dir(), "note": "doctor never downloads models; an OCR call with download_models:true fetches them"}));
+        let (a11y_status, a11y_detail) = crate::a11y::probe(&target.session_bus).await;
+        push("accessibility", a11y_status, a11y_detail);
+        let (portal_status, portal_detail) = crate::portal::probe(&target.session_bus).await;
+        push("portal", portal_status, portal_detail);
         push("portal_enabled", if crate::portal_session::portal_enabled() { "yes" } else { "no" }, serde_json::json!({"note": "--portal opts into the consented screen-sharing portal"}));
+        let layer_shell = disc.as_ref().is_ok_and(|d| d.globals.iter().any(|(_, i, _)| i == "zwlr_layer_shell_v1"));
+        push("indicator", if !crate::config::get().indicator { "off" } else if layer_shell { "on" } else { "unavailable" }, serde_json::json!({"note": if !crate::config::get().indicator { "disabled by --no-indicator" } else if layer_shell { "drawn with layer-shell" } else { "needs layer-shell, which this desktop lacks" }}));
         Ok(serde_json::json!({"target": target.id, "checks": checks}))
     }
 

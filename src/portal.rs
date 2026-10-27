@@ -2,34 +2,56 @@
 //! started by an explicit input action on a portal-only target; doctor never prompts.
 use zbus::Proxy;
 
-pub async fn probe(session_bus: &Option<String>) -> serde_json::Value {
+/// Read-only portal check for `doctor`. Returns `(status, detail)`:
+/// - `available`: ScreenCast and RemoteDesktop work, with keyboard or pointer.
+/// - `capture-only`: ScreenCast works but RemoteDesktop offers no input devices.
+/// - `unavailable`: no portal service, or no usable ScreenCast.
+/// The portal service is not D-Bus-activated here: if nothing owns
+/// `org.freedesktop.portal.Desktop`, that is reported instead of starting it.
+pub async fn probe(session_bus: &Option<String>) -> (&'static str, serde_json::Value) {
     let conn = match crate::a11y::session_connection(session_bus).await {
         Ok(c) => c,
-        Err(e) => return serde_json::json!({"available": false, "error": e}),
+        Err(e) => return ("unavailable", serde_json::json!({"error": e})),
     };
-    let mut out = serde_json::json!({"available": true});
-    if let Ok(proxy) = Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.RemoteDesktop").await {
-        let devices: Result<u32, _> = proxy.get_property("AvailableDeviceTypes").await;
-        out["remote_desktop_available_device_types"] = match devices { Ok(d) => serde_json::json!({"value": d, "keyboard": d & 1 != 0, "pointer": d & 2 != 0, "touchscreen": d & 4 != 0}), Err(e) => serde_json::json!({"error": e.to_string()}) };
-    } else { out["remote_desktop"] = serde_json::json!("interface unavailable"); }
-    if let Ok(proxy) = Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast").await {
-        let sources: Result<u32, _> = proxy.get_property("AvailableSourceTypes").await;
-        out["screencast_available_source_types"] = match sources { Ok(s) => serde_json::json!(s), Err(e) => serde_json::json!({"error": e.to_string()}) };
-    } else { out["screencast"] = serde_json::json!("interface unavailable"); }
-    // Proxy::new does not verify the interface exists (lazy proxy), so read a
-    // real property: portal interfaces expose a `version` property. A failed
-    // read means the interface is not actually implemented by the portal.
-    match Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Clipboard").await {
-        Ok(proxy) => {
-            let version: Result<u32, _> = proxy.get_property("version").await;
-            out["clipboard_portal"] = match version {
-                Ok(v) => serde_json::json!({"interface": "present", "version": v, "note": "requires a remote-desktop session to use"}),
-                Err(e) => serde_json::json!({"interface": "unavailable", "error": e.to_string()}),
-            };
-        }
-        Err(e) => { out["clipboard_portal"] = serde_json::json!({"interface": "unavailable", "error": e.to_string()}); }
+    let owned = match (zbus::fdo::DBusProxy::new(&conn).await, zbus::names::BusName::try_from("org.freedesktop.portal.Desktop")) {
+        (Ok(dbus), Ok(name)) => tokio::time::timeout(std::time::Duration::from_secs(3), dbus.name_has_owner(name)).await,
+        (Err(e), _) => return ("error", serde_json::json!({"error": format!("D-Bus proxy: {e}")})),
+        (_, Err(e)) => return ("error", serde_json::json!({"error": e.to_string()})),
+    };
+    match owned {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return ("unavailable", serde_json::json!({"service": "not running"})),
+        Ok(Err(e)) => return ("error", serde_json::json!({"error": format!("NameHasOwner: {e}")})),
+        Err(_) => return ("error", serde_json::json!({"error": "NameHasOwner timed out after 3s"})),
     }
-    out
+    let mut out = serde_json::json!({});
+    // Proxy::new is lazy and does not prove an interface exists; reading a
+    // property does. A failed read means the interface is not implemented.
+    let mut devices = 0u32;
+    match Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.RemoteDesktop").await {
+        Ok(proxy) => match proxy.get_property::<u32>("AvailableDeviceTypes").await {
+            Ok(d) => { devices = d; out["input_devices"] = serde_json::json!([(d & 1 != 0).then_some("keyboard"), (d & 2 != 0).then_some("pointer"), (d & 4 != 0).then_some("touchscreen")].into_iter().flatten().collect::<Vec<_>>()); }
+            Err(e) => out["remote_desktop"] = serde_json::json!(format!("unavailable: {e}")),
+        },
+        Err(e) => out["remote_desktop"] = serde_json::json!(format!("unavailable: {e}")),
+    }
+    let mut sources = 0u32;
+    match Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.ScreenCast").await {
+        Ok(proxy) => match proxy.get_property::<u32>("AvailableSourceTypes").await {
+            Ok(s) => { sources = s; out["capture_sources"] = serde_json::json!([(s & 1 != 0).then_some("monitor"), (s & 2 != 0).then_some("window"), (s & 4 != 0).then_some("virtual")].into_iter().flatten().collect::<Vec<_>>()); }
+            Err(e) => out["screencast"] = serde_json::json!(format!("unavailable: {e}")),
+        },
+        Err(e) => out["screencast"] = serde_json::json!(format!("unavailable: {e}")),
+    }
+    out["clipboard"] = match Proxy::new(&conn, "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Clipboard").await {
+        Ok(proxy) => match proxy.get_property::<u32>("version").await {
+            Ok(_) => serde_json::json!("available"),
+            Err(_) => serde_json::json!("unavailable"),
+        },
+        Err(_) => serde_json::json!("unavailable"),
+    };
+    let status = if sources == 0 { "unavailable" } else if devices & 3 == 0 { "capture-only" } else { "available" };
+    (status, out)
 }
 
 /// Touch dispatch decision. Returns Ok(mapping description) only for a verified,

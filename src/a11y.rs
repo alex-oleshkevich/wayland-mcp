@@ -54,6 +54,58 @@ pub async fn set_enabled(session_bus: &Option<String>, value: bool) -> Result<()
     proxy.set_property("IsEnabled", value).await.map_err(|e| format!("set IsEnabled: {e}"))
 }
 
+/// Read-only accessibility check for `doctor`. Returns `(status, detail)`:
+/// - `unavailable`: no session bus, or nothing owns `org.a11y.Bus`. The bus is
+///   not activated here: activation would start a daemon, and doctor must not
+///   change anything.
+/// - `error`: the bus is owned but its address or the AT-SPI bus can't be reached.
+/// - `disabled`: the AT-SPI bus works but `IsEnabled` is false, so toolkits
+///   may not expose their apps (a11y_enable turns it on).
+/// - `available`: reachable and enabled; `applications` counts registered apps.
+pub async fn probe(session_bus: &Option<String>) -> (&'static str, serde_json::Value) {
+    let session = match session_connection(session_bus).await {
+        Ok(c) => c,
+        Err(e) => return ("unavailable", serde_json::json!({"error": e})),
+    };
+    let dbus = match zbus::fdo::DBusProxy::new(&session).await {
+        Ok(p) => p,
+        Err(e) => return ("error", serde_json::json!({"error": format!("D-Bus proxy: {e}")})),
+    };
+    let owned = match BusName::try_from("org.a11y.Bus") {
+        Ok(name) => tokio::time::timeout(Duration::from_secs(3), dbus.name_has_owner(name)).await,
+        Err(e) => return ("error", serde_json::json!({"error": e.to_string()})),
+    };
+    match owned {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => return ("unavailable", serde_json::json!({"bus": "not running", "note": "org.a11y.Bus has no owner; a11y_enable or a11y_tree start it on demand"})),
+        Ok(Err(e)) => return ("error", serde_json::json!({"error": format!("NameHasOwner: {e}")})),
+        Err(_) => return ("error", serde_json::json!({"error": "NameHasOwner timed out after 3s"})),
+    }
+    let st = match tokio::time::timeout(Duration::from_secs(3), status(session_bus)).await {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return ("error", serde_json::json!({"error": e})),
+        Err(_) => return ("error", serde_json::json!({"error": "reading org.a11y.Status timed out after 3s"})),
+    };
+    let conn = match tokio::time::timeout(Duration::from_secs(5), a11y_connection(session_bus)).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return ("error", serde_json::json!({"is_enabled": st["is_enabled"], "error": e})),
+        Err(_) => return ("error", serde_json::json!({"is_enabled": st["is_enabled"], "error": "connecting to the AT-SPI bus timed out after 5s"})),
+    };
+    let apps: Option<usize> = async {
+        let proxy = Proxy::new(&conn, "org.a11y.atspi.Registry", "/org/a11y/atspi/accessible/root", "org.a11y.atspi.Accessible").await.ok()?;
+        let children: Vec<(String, OwnedObjectPath)> = tokio::time::timeout(Duration::from_secs(3), proxy.call("GetChildren", &())).await.ok()?.ok()?;
+        Some(children.len())
+    }.await;
+    let enabled = st["is_enabled"].as_bool();
+    let status = if enabled == Some(false) { "disabled" } else { "available" };
+    (status, serde_json::json!({
+        "is_enabled": enabled,
+        "screen_reader_enabled": st["screen_reader_enabled"],
+        "applications": apps,
+        "note": if apps.is_none() { "AT-SPI registry did not answer; the tree may be empty until an app registers" } else { "a11y_tree lists these applications" },
+    }))
+}
+
 fn split_ref(ref_id: &str) -> Result<(String, String), String> {
     ref_id.split_once('|').map(|(a, b)| (a.to_string(), b.to_string())).ok_or_else(|| format!("invalid accessibility ref '{ref_id}' (expected 'bus|/path' from a11y_tree/a11y_find)"))
 }
