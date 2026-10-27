@@ -52,9 +52,24 @@ wayland-mcp runs on Linux with a Wayland session. The macOS builds on the
 releases page exist only so the project builds everywhere; they print an
 "unsupported platform" error and exit.
 
-Prebuilt Linux binaries for amd64 and arm64 are on the
+The quickest way to install is the install script. It downloads the latest
+release for your CPU (amd64 or arm64), checks its SHA-256 checksum and puts
+`wayland-mcp` in `~/.local/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alex-oleshkevich/wayland-mcp/main/install.sh | sh
+```
+
+To pick a release or a different directory, pass options after `sh -s --`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alex-oleshkevich/wayland-mcp/main/install.sh | sh -s -- --version v0.2.0 --dir /usr/local/bin
+```
+
+You can also download an archive yourself from the
 [releases page](https://github.com/alex-oleshkevich/wayland-mcp/releases).
-They need PipeWire and xkbcommon installed, which every Wayland desktop has.
+The binary needs PipeWire and xkbcommon installed, which every Wayland desktop
+has.
 
 To build from source you need a Rust toolchain plus the PipeWire and
 xkbcommon development libraries (the PipeWire bindings also need clang to
