@@ -70,7 +70,11 @@ fn keymap_string(extra_chars: &[char]) -> Result<(String, Vec<(char, u32)>), Str
     let mut ctx = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
     let km = xkbcommon::xkb::Keymap::new_from_names(&mut ctx, "evdev", "", "us", "", None, xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS)
         .ok_or("failed to compile evdev/us keymap via libxkbcommon")?;
-    let mut s = km.get_as_string(xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1);
+    extend_keymap(km.get_as_string(xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1), extra_chars)
+}
+
+/// Assign `extra_chars` to the F13-F24 spare keys of keymap text `s`.
+fn extend_keymap(mut s: String, extra_chars: &[char]) -> Result<(String, Vec<(char, u32)>), String> {
     let mut assigned = Vec::new();
     if !extra_chars.is_empty() {
         // Parse existing key name -> xkb keycode from the keycodes section.
@@ -90,7 +94,15 @@ fn keymap_string(extra_chars: &[char]) -> Result<(String, Vec<(char, u32)>), Str
             let name = candidates.get(i).ok_or("unicode spare keys exhausted (F13-F24 all assigned)")?;
             let code = codes[name];
             let needle = format!("key <{name}>");
-            let pos = s.find(&needle).ok_or_else(|| format!("spare key {name} has no symbols entry"))?;
+            let Some(pos) = s.find(&needle) else {
+                // Some xkeyboard-config versions (e.g. Ubuntu's) map no symbols to
+                // this spare key: add a fresh one-level entry to xkb_symbols.
+                let sym = s.find("\nxkb_symbols").ok_or("keymap has no xkb_symbols section")?;
+                let end = s[sym..].find("\n};").map(|e| sym + e + 1).ok_or("xkb_symbols section malformed")?;
+                s.insert_str(end, &format!("\tkey <{name}> {{ [ U{:04X} ] }};\n", *ch as u32));
+                assigned.push((*ch, code - 8));
+                continue;
+            };
             // FK23/FK24 carry a two-level `type=` in the stock keymap; a lone
             // keysym under that type does not compile, so force ONE_LEVEL.
             let block_end = s[pos..].find("};").map(|e| pos + e).ok_or("spare key block malformed")?;
@@ -501,6 +513,18 @@ mod spare_key_tests {
     #[test] fn all_twelve_spare_keys_compile() {
         let chars: Vec<char> = "ñ¿¡áíóúçàèéê".chars().collect();
         let (_, assigned) = super::keymap_string(&chars).expect("12 spare keys must compile");
+        assert_eq!(assigned.len(), 12);
+    }
+    /// Ubuntu's xkeyboard-config has no symbols entry for some spare keys; the
+    /// assignment must add one rather than fail.
+    #[test] fn spare_keys_without_symbols_entries_are_added() {
+        let mut ctx = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
+        let km = xkbcommon::xkb::Keymap::new_from_names(&mut ctx, "evdev", "", "us", "", None, xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS).unwrap();
+        let full = km.get_as_string(xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1);
+        let stripped: String = full.lines().filter(|l| !l.contains("key <FK19>") && !l.contains("key <FK20>")).map(|l| format!("{l}\n")).collect();
+        assert!(!stripped.contains("key <FK19>"));
+        let chars: Vec<char> = "ñ¿¡áíóúçàèéê".chars().collect();
+        let (_, assigned) = super::extend_keymap(stripped, &chars).expect("missing spare-key entries must be added");
         assert_eq!(assigned.len(), 12);
     }
 }
