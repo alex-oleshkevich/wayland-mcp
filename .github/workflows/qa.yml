@@ -1,0 +1,63 @@
+name: QA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Downloaded .debs are cached: the runner's apt mirror can be slow enough
+      # to stall a run.
+      - uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-qa-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Install system libraries
+        run: |
+          mkdir -p ~/apt-archives/partial
+          sudo apt-get update
+          sudo apt-get install -y -o Dir::Cache::Archives="$HOME/apt-archives" \
+            libpipewire-0.3-dev libxkbcommon-dev libgtk-4-dev clang pkg-config
+          sudo chown -R "$USER" ~/apt-archives
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Build fixture
+        run: cargo build --features fixture --bin gtk-fixture
+
+      - name: Test
+        run: cargo test
+
+      # Not a gate yet; keeps warnings visible.
+      - name: Clippy (not gated)
+        run: cargo clippy --all-targets
+
+  # wayland-mcp is Linux-only at runtime; this keeps the macOS release build compiling.
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --release

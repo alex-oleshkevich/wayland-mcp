@@ -1,0 +1,20 @@
+# Rust
+/target/
+
+# Local VM images, keys, ISO and helper scripts. Only the test suites are shared.
+/.vmtest/*
+!/.vmtest/battery.py
+!/.vmtest/battery2.py
+!/.vmtest/fixture_suite.py
+!/.vmtest/fixture_clipboard.py
+
+# Local agent tooling and scratch files
+.agents/
+.claude/
+.codex/
+.cursor/
+/AGENTS.md
+/CLAUDE.md
+/c1.py
+/c2_write.txt
+/mcpd.py

@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  # Manual runs build every platform but never publish a release.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          # macOS builds start and exit with "this platform is not supported":
+          # wayland-mcp needs Linux with a Wayland session.
+          - name: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: macos-amd64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        if: runner.os == 'Linux'
+        with:
+          path: ~/apt-archives
+          key: apt-release-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p ~/apt-archives/partial
+          sudo apt-get update
+          sudo apt-get install -y -o Dir::Cache::Archives="$HOME/apt-archives" \
+            libpipewire-0.3-dev libxkbcommon-dev clang pkg-config
+          sudo chown -R "$USER" ~/apt-archives
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin wayland-mcp
+
+      - name: Package
+        shell: bash
+        run: |
+          staging="wayland-mcp-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/wayland-mcp" README.md REFERENCE.md LICENSE "$staging/"
+          tar -czf "$staging.tar.gz" "$staging"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wayland-mcp-${{ matrix.name }}
+          path: wayland-mcp-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wayland-mcp-*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: wayland-mcp-*.tar.gz
+          generate_release_notes: true

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-labelledby="title desc">
+  <title id="title">wayland-mcp</title>
+  <desc id="desc">Monochrome silhouette of a monitor containing a small nested window, with a pointer cursor reaching into the window.</desc>
+  <defs>
+    <mask id="cursor-gap" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
+      <rect width="64" height="64" fill="#fff"/>
+      <path d="M32 22v21.5l5-5 4 8.5 4.5-2-4-8.5h7z" fill="#000" stroke="#000" stroke-width="6" stroke-linejoin="round"/>
+    </mask>
+  </defs>
+  <g fill="currentColor">
+    <g mask="url(#cursor-gap)">
+      <!-- Monitor bezel, neck and base -->
+      <path fill-rule="evenodd" d="M10 9h44a6 6 0 0 1 6 6v26a6 6 0 0 1-6 6H10a6 6 0 0 1-6-6V15a6 6 0 0 1 6-6zm0 5a1 1 0 0 0-1 1v26a1 1 0 0 0 1 1h44a1 1 0 0 0 1-1V15a1 1 0 0 0-1-1z"/>
+      <path d="M28 46h8l1.5 6h-11z"/>
+      <rect x="20" y="51" width="24" height="5" rx="2.5"/>
+      <!-- Nested sandbox window -->
+      <rect x="13" y="18" width="24" height="17" rx="2"/>
+    </g>
+    <!-- Pointer cursor -->
+    <path d="M32 22v21.5l5-5 4 8.5 4.5-2-4-8.5h7z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>
+  </g>
+</svg>

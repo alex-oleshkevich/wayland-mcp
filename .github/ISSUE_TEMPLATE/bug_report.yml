@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in wayland-mcp does not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Include the tool you called, its arguments and what the server returned.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: wayland-mcp version
+      description: Release tag or git commit.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Desktop
+      description: Compositor and version (niri, sway, GNOME, KDE, ...), target (host or sandbox), and whether WAYLAND_MCP_PORTAL is set.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: doctor output and logs
+      description: Output of the `doctor` tool and the server's stderr.

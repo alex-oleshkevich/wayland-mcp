@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc">
+  <title id="title">wayland-mcp</title>
+  <desc id="desc">A desktop monitor on a violet rounded square. On its dark screen sits a small amber window, the private sandbox desktop, and a large amber pointer cursor reaches into it, showing an agent operating the desktop.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7046e0"/>
+      <stop offset="1" stop-color="#2e1b7a"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a1d66"/>
+      <stop offset="1" stop-color="#1b1247"/>
+    </linearGradient>
+    <linearGradient id="warm" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffc35c"/>
+      <stop offset="1" stop-color="#ff8a4c"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background tile -->
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#sheen)"/>
+
+  <!-- Monitor -->
+  <g id="monitor">
+    <path d="M230 352h52l10 40h-72z" fill="#d9d0fb"/>
+    <rect x="172" y="384" width="168" height="26" rx="13" fill="#f3efff"/>
+    <rect x="72" y="104" width="368" height="256" rx="34" fill="#f3efff"/>
+    <rect x="96" y="128" width="320" height="208" rx="16" fill="url(#screen)"/>
+  </g>
+
+  <!-- Nested sandbox window -->
+  <g id="sandbox">
+    <rect x="124" y="156" width="184" height="132" rx="14" fill="#b9a6ff"/>
+    <path d="M138 156h156a14 14 0 0 1 14 14v22H124v-22a14 14 0 0 1 14-14z" fill="url(#warm)"/>
+    <rect x="144" y="212" width="96" height="14" rx="7" fill="#2a1d66" opacity="0.35"/>
+    <rect x="144" y="240" width="64" height="14" rx="7" fill="#2a1d66" opacity="0.35"/>
+  </g>
+
+  <!-- Pointer cursor (the agent) -->
+  <path id="cursor" d="M268 212v134l33-31 24 52 28-13-24-51h46z" fill="url(#warm)" stroke="#1b1247" stroke-width="12" stroke-linejoin="round"/>
+</svg>
