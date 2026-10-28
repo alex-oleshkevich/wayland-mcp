@@ -133,6 +133,10 @@ fn extend_keymap(mut s: String, extra_chars: &[char]) -> Result<(String, Vec<(ch
     Ok((s, assigned))
 }
 
+/// Settle after the post-typing roundtrip: time for the focused client's
+/// event loop to apply the keys the compositor has already delivered.
+const TYPE_SETTLE_MS: u64 = 50;
+
 pub struct NativeInput {
     pub target_id: String,
     queue: wayland_client::EventQueue<IState>,
@@ -174,6 +178,9 @@ impl NativeInput {
     }
     fn time(&self) -> u32 { self.start.elapsed().as_millis() as u32 }
     fn flush(&mut self) -> Result<(), String> { self.queue.flush().map_err(|e| format!("wayland flush: {e}"))?; self.queue.dispatch_pending(&mut self.state).map_err(|e| format!("wayland dispatch: {e}"))?; Ok(()) }
+    /// Block until the compositor has processed every request sent so far
+    /// (wl_display.sync), i.e. forwarded all injected input to the focused client.
+    fn roundtrip(&mut self) -> Result<(), String> { self.queue.roundtrip(&mut self.state).map(|_| ()).map_err(|e| format!("wayland roundtrip: {e}")) }
     pub fn key_event_pub(&mut self, evdev: u32, pressed: bool) -> Result<(), String> { self.key_event(evdev, pressed, 0) }
     fn upload_keymap(&mut self, extra: &[char]) -> Result<(), String> {
         let (text, _) = keymap_string(extra)?;
@@ -322,6 +329,12 @@ impl NativeInput {
             dispatched += 1;
             std::thread::sleep(Duration::from_millis(4));
         }
+        // Return only after the compositor has handled every key (and sent it
+        // to the focused client), plus a short settle for the client's own
+        // event loop. Wayland offers no ack of client-side processing, so a
+        // readback should still wait for the expected state.
+        self.roundtrip()?;
+        std::thread::sleep(Duration::from_millis(TYPE_SETTLE_MS));
         Ok(dispatched)
     }
     pub fn release_all(&mut self) -> Result<serde_json::Value, String> {

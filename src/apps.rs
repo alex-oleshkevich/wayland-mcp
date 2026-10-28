@@ -135,6 +135,16 @@ pub struct Sandbox {
     pub bus_pid: Option<u32>,
     pub socket_name: String,
     pub a11y_pid: Option<u32>,
+    pub host_window: HostWindowOutcome,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HostWindowOutcome {
+    NotNiriHost,
+    WindowNotFound { error: String },
+    Resized { window_id: u64, host_scale: f64, host_logical: [u32; 2], scale_note: Option<String> },
+    ResizeFailed { window_id: u64, error: String },
 }
 
 pub struct LogStore { pub lines: VecDeque<(u64, String, String)>, pub next_seq: u64 }
@@ -194,6 +204,106 @@ fn write_bus_config(dir: &std::path::Path) -> Result<std::path::PathBuf, String>
         xml_escape(session), xml_escape(&services.to_string_lossy()));
     std::fs::write(&path, body).map_err(|e| format!("write sandbox bus config: {e}"))?;
     Ok(path)
+}
+
+/// True when the host session is niri: NIRI_SOCKET names an existing socket
+/// in this server's own environment, so `niri msg` without overrides reaches
+/// the host compositor.
+fn host_niri_socket() -> Option<PathBuf> {
+    let sock = std::env::var_os("NIRI_SOCKET").map(PathBuf::from)?;
+    sock.exists().then_some(sock)
+}
+
+/// Window id of the sandbox compositor on the host, from `niri msg -j windows`
+/// output. Matched strictly by pid: the caller must never act on a window it
+/// did not spawn.
+fn window_id_with_pid(windows: &serde_json::Value, pid: u32) -> Option<u64> {
+    windows.as_array()?.iter().find(|w| w["pid"].as_u64() == Some(pid as u64))?.get("id")?.as_u64()
+}
+
+/// True when any output in `niri msg -j outputs` JSON already reports mode or
+/// logical size `w`x`h` (a winit output may report only one of the two).
+fn outputs_have_size(outputs: &serde_json::Value, w: u32, h: u32) -> bool {
+    let (w, h) = (w as u64, h as u64);
+    outputs.as_object().map(|m| m.values().any(|o| {
+        let mode = o["current_mode"].as_u64().and_then(|index| usize::try_from(index).ok()).and_then(|index| o["modes"].as_array()?.get(index));
+        mode.is_some_and(|mode| mode["width"].as_u64() == Some(w) && mode["height"].as_u64() == Some(h))
+            || (o["logical"]["width"].as_u64() == Some(w) && o["logical"]["height"].as_u64() == Some(h))
+    })).unwrap_or(false)
+}
+
+/// Convert the nested winit output's physical pixels to the host window's logical pixels.
+fn host_window_size(windows: &serde_json::Value, workspaces: &serde_json::Value, outputs: &serde_json::Value, window_id: u64, width: u32, height: u32) -> (f64, [u32; 2], Option<String>) {
+    let scale = (|| {
+        let window = windows.as_array().and_then(|windows| windows.iter().find(|w| w["id"].as_u64() == Some(window_id))).ok_or("host window missing from windows")?;
+        let workspace_id = window["workspace_id"].as_u64().ok_or("host window has no workspace_id")?;
+        let workspace = workspaces.as_array().and_then(|workspaces| workspaces.iter().find(|w| w["id"].as_u64() == Some(workspace_id))).ok_or("host window workspace missing from workspaces")?;
+        let output_name = workspace["output"].as_str().ok_or("host window workspace has no output")?;
+        let output = outputs.as_object().and_then(|outputs| outputs.get(output_name)).ok_or("host workspace output missing from outputs")?;
+        output["logical"]["scale"].as_f64().filter(|scale| scale.is_finite() && *scale > 0.0).ok_or("host output has no positive logical scale")
+    })();
+    let (scale, note) = match scale { Ok(scale) => (scale, None), Err(e) => (1.0, Some(format!("Host scale lookup failed; using 1.0: {e}"))) };
+    (scale, [(f64::from(width) / scale).round() as u32, (f64::from(height) / scale).round() as u32], note)
+}
+
+/// On a niri host, the nested compositor runs as an ordinary window on the
+/// host and the host's layout decides its size: a tiling host stretches the
+/// window, and the nested winit output follows it, so the nested config
+/// `mode` and the nested custom-mode call do not control the geometry. Find
+/// the nested compositor's window on the host (strictly by pid; the window
+/// maps shortly after the nested Wayland socket appears, so poll briefly,
+/// bounded ~3 s) and float it at exactly `width`x`height`. Report unsupported
+/// hosts, lookup failures and action failures rather than claiming a resize.
+fn size_host_window(niri_pid: u32, width: u32, height: u32) -> HostWindowOutcome {
+    if host_niri_socket().is_none() { return HostWindowOutcome::NotNiriHost; }
+    let mut win_id = None;
+    let mut lookup_error = None;
+    for _ in 0..30 {
+        match Command::new("niri").args(["msg", "-j", "windows"]).output() {
+            Ok(out) if out.status.success() => match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                Ok(v) => { win_id = window_id_with_pid(&v, niri_pid); lookup_error = None; }
+                Err(e) => lookup_error = Some(format!("parse host niri windows: {e}")),
+            },
+            Ok(out) => lookup_error = Some(format!("host niri windows exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim())),
+            Err(e) => lookup_error = Some(format!("query host niri windows: {e}")),
+        }
+        if win_id.is_some() { break; }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let Some(window_id) = win_id else { return HostWindowOutcome::WindowNotFound { error: lookup_error.unwrap_or_else(|| format!("no host window matched nested niri pid {niri_pid} within 3 seconds")) }; };
+    let id = window_id.to_string();
+    let action = |name: &str, size: Option<u32>| -> Result<(), String> {
+        let mut cmd = Command::new("niri");
+        cmd.args(["msg", "action", name, "--id", &id]);
+        if let Some(size) = size { cmd.arg(size.to_string()); }
+        match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => Err(format!("niri msg action {name} exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim())),
+            Err(e) => Err(format!("niri msg action {name}: {e}")),
+        }
+    };
+    if let Err(error) = action("move-window-to-floating", None) { return HostWindowOutcome::ResizeFailed { window_id, error }; }
+    // Float first, then re-read the window's workspace and its host output scale.
+    let query = |name: &str| -> Result<serde_json::Value, String> {
+        let out = Command::new("niri").args(["msg", "-j", name]).output().map_err(|e| format!("query host niri {name}: {e}"))?;
+        if !out.status.success() { return Err(format!("host niri {name} exited {}: {}", out.status, String::from_utf8_lossy(&out.stderr).trim())); }
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse host niri {name}: {e}"))
+    };
+    let geometry = (|| {
+        let windows = query("windows")?;
+        let workspaces = query("workspaces")?;
+        let outputs = query("outputs")?;
+        Ok::<_, String>(host_window_size(&windows, &workspaces, &outputs, window_id, width, height))
+    })();
+    let (host_scale, host_logical, scale_note) = match geometry { Ok(size) => size, Err(e) => (1.0, [width, height], Some(format!("Host scale lookup failed; using 1.0: {e}"))) };
+    // SizeChange parses a bare number as SetFixed in HOST logical pixels; winit uses physical pixels.
+    for (name, size) in [("set-window-width", host_logical[0]), ("set-window-height", host_logical[1])] {
+        if let Err(mut error) = action(name, Some(size)) {
+            if let Some(note) = &scale_note { error.push_str("; "); error.push_str(note); }
+            return HostWindowOutcome::ResizeFailed { window_id, error };
+        }
+    }
+    HostWindowOutcome::Resized { window_id, host_scale, host_logical, scale_note }
 }
 
 pub fn start_sandbox(id: &str, width: u32, height: u32) -> Result<(Sandbox, TargetSpec, String), String> {
@@ -301,12 +411,25 @@ pub fn start_sandbox(id: &str, width: u32, height: u32) -> Result<(Sandbox, Targ
     let mut activation_env: Vec<(&str, &Path)> = vec![("WAYLAND_DISPLAY", &wayland_socket), ("XDG_RUNTIME_DIR", &runtime)];
     if let Some(sock) = &niri_socket { activation_env.push(("NIRI_SOCKET", sock)); }
     update_activation_environment(&bus_addr, &activation_env)?;
+    // On a niri host the nested compositor's size is decided by the host
+    // window, not by the nested config mode: float it at the requested size
+    // (no-op on hosts without niri IPC).
+    let host_window = size_host_window(niri_pid, width, height);
     // Ask the nested compositor for the requested mode via its IPC socket; the
     // effective geometry is always re-read and reported by the caller afterwards.
     if let Some(sock) = &niri_socket {
         let _ = Command::new("niri").args(["msg", "output", "winit", "custom-mode", &width.to_string(), &height.to_string(), "60000"])
             .env("NIRI_SOCKET", sock).output();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // The winit output's mode follows the host window size, which the
+        // host applies asynchronously; wait (bounded) until it matches.
+        for _ in 0..30 {
+            if let Ok(out) = Command::new("niri").args(["msg", "-j", "outputs"]).env("NIRI_SOCKET", sock).output() {
+                if out.status.success() {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) { if outputs_have_size(&v, width, height) { break; } }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
     let spec = TargetSpec { id: id.to_string(), socket: wayland_socket.clone(), session_bus: Some(bus_addr.clone()), kind: "sandbox".into() };
     // Accessibility for the private bus: activating org.a11y.Bus only creates the
@@ -336,7 +459,7 @@ pub fn start_sandbox(id: &str, width: u32, height: u32) -> Result<(Sandbox, Targ
     if sandbox_start_closed() { return Err("sandbox start aborted by server shutdown".into()); }
     guard.disarm();
     // Pids were already registered at spawn time; nothing to extend here.
-    Ok((Sandbox { target_id: id.to_string(), dir, niri_pid, bus_pid: Some(bus_pid), socket_name, a11y_pid }, spec, bus_addr))
+    Ok((Sandbox { target_id: id.to_string(), dir, niri_pid, bus_pid: Some(bus_pid), socket_name, a11y_pid, host_window }, spec, bus_addr))
 }
 
 pub fn stop_sandbox(sb: &Sandbox) {
@@ -533,6 +656,42 @@ pub fn stop_app(entry: &AppEntry, timeout_ms: u64) -> Result<serde_json::Value, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_id_with_pid_matches_only_that_pid() {
+        let windows = serde_json::json!([{"id": 1, "pid": 111}, {"id": 42, "pid": 222, "is_floating": false}]);
+        assert_eq!(window_id_with_pid(&windows, 222), Some(42));
+        assert_eq!(window_id_with_pid(&windows, 333), None);
+        assert_eq!(window_id_with_pid(&serde_json::json!({}), 222), None, "object instead of array");
+    }
+
+    #[test]
+    fn outputs_have_size_accepts_mode_or_logical() {
+        let outputs = serde_json::json!({"winit": {"current_mode": 1, "modes": [{"width": 1913, "height": 2105}, {"width": 800, "height": 600}], "logical": {"width": 400, "height": 300}}});
+        assert!(outputs_have_size(&outputs, 800, 600), "current_mode indexes the modes array");
+        assert!(outputs_have_size(&outputs, 400, 300), "logical size also matches independently");
+        assert!(!outputs_have_size(&outputs, 1913, 2105), "inactive modes must not match");
+        let logical_only = serde_json::json!({"winit": {"current_mode": null, "modes": [], "logical": {"width": 640, "height": 480}}});
+        assert!(outputs_have_size(&logical_only, 640, 480));
+        assert!(!outputs_have_size(&logical_only, 641, 480));
+        let invalid_index = serde_json::json!({"winit": {"current_mode": 2, "modes": [{"width": 800, "height": 600}], "logical": {"width": 640, "height": 480}}});
+        assert!(outputs_have_size(&invalid_index, 640, 480), "logical fallback survives an invalid mode index");
+        assert!(!outputs_have_size(&invalid_index, 800, 600));
+        assert!(!outputs_have_size(&serde_json::json!([]), 800, 600), "non-object outputs");
+    }
+
+    #[test]
+    fn host_window_size_accounts_for_host_scale_and_falls_back() {
+        let windows = serde_json::json!([{"id": 1, "workspace_id": 10}, {"id": 42, "workspace_id": 20}]);
+        let workspaces = serde_json::json!([{"id": 10, "output": "OTHER"}, {"id": 20, "output": "DP-1"}]);
+        let outputs = serde_json::json!({"OTHER": {"logical": {"scale": 2.0}}, "DP-1": {"logical": {"scale": 1.25}}});
+        assert_eq!(host_window_size(&windows, &workspaces, &outputs, 42, 800, 600), (1.25, [640, 480], None));
+        let (scale, logical, note) = host_window_size(&windows, &workspaces, &serde_json::json!({}), 42, 800, 600);
+        assert_eq!((scale, logical), (1.0, [800, 600]));
+        assert!(note.unwrap().contains("output missing"), "fallback must be reported");
+        let (_, rounded, _) = host_window_size(&windows, &workspaces, &outputs, 42, 801, 602);
+        assert_eq!(rounded, [641, 482], "round host logical dimensions to the nearest pixel");
+    }
 
     #[test]
     fn sandbox_env_strip_removes_host_display_routing() {

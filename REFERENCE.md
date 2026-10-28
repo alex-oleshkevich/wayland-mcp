@@ -59,7 +59,7 @@ these do not by themselves change exit 0.
 | Held input and clipboard ownership | Released/closed at call cleanup. Complete gestures/chords, paste mode where supported, or one batch can keep related actions together. Clipboard-manager persistence is not guaranteed. |
 | Portal approval, backend devices and indicator | Connection-scoped: closed at cleanup; a new portal call can ask again. One batch can share consent across its allowed steps. |
 | Active traces and recording handles | Connection-scoped: start/stop cannot span shell calls; recordings stop at cleanup. Use persistent MCP stdio. Disk artifacts remain readable; trace replay still validates target/layout/arguments. |
-| Batch result references and image export | Not implemented by the server: batch prevalidates static arguments, permits only its action whitelist, and summarizes images as text. No new CLI batch semantics are invented. |
+| Batch result references and image export | Batch prevalidates static arguments and permits only its action whitelist. Step results are returned as parsed JSON and step images (e.g. `screenshot`) are appended to the batch response with an `image_index`, but later steps cannot reference earlier results (use the returned `shot_id` in a following call). |
 
 No daemon/background broker is introduced. The fresh-server boundary is
 intentional: it prevents leaking owned processes/input and cannot be removed
@@ -82,7 +82,12 @@ install the agent skill with `npx skills add alex-oleshkevich/wayland-mcp`.
   isolates desktop interaction only; it is **not** a filesystem/network
   sandbox. Requires the `niri` executable; no other compositor is
   substituted. `target_select` switches explicitly; there is no automatic
-  fallback from an unavailable sandbox to the host.
+  fallback from an unavailable sandbox to the host. The nested compositor is
+  a window on the host, so the host decides its size: on a niri host
+  `sandbox_start` floats that window and resizes it (compensating the host
+  output scale) to `width`×`height`; elsewhere the response reports
+  `requested` vs the effective outputs with `size_mismatch`. The nested
+  winit output advertises `Flipped180`; captures correct for it.
 
 ## Coordinate contract
 
@@ -181,10 +186,21 @@ niri host + sandbox:
   normal state.
 - Transport: large requests are served with 64 MiB lines (17 MiB round trip).
 - Changes: baseline pass/fail with regions; size mismatch is reported, never
-  rescaled. `wait_screen`/`wait_for_text` return `satisfied:false` on timeout
-  as a normal result. `frame_probe` reports sampling pattern, not FPS.
+  rescaled. `baseline_compare` is strict by default (pass only with zero
+  changed pixels after `threshold` and `ignored_regions`); tolerate
+  animation/caret/clock with `ignored_regions` or `max_changed_pixels` /
+  `max_changed_ratio` (the limits used are reported). `wait_screen`/`wait_for_text`
+  return `satisfied:false` on timeout as a normal result. `wait_for_text`
+  `mode:'disappear'` returns `satisfied:false, reason:'not_present_at_start'` when
+  the text is absent at the first capture (override: `allow_absent_at_start`);
+  `find_text`/`wait_for_text` accept `case_insensitive`. `frame_probe` reports
+  sampling pattern, not FPS.
 - Automation: batch validates all steps before dispatch and stops on the first
-  error by default. Trace replay executes and refuses when the recorded target
+  error by default; per-step `result` is the parsed JSON (or full text) and step
+  images are appended as image blocks (`image_index`); `wait_screen` is an allowed
+  step. Trace replay executes, keeps the recorded gaps between steps by default
+  (`timing:'recorded'`, each gap capped by `max_gap_ms`, `timing:'none'` for
+  back-to-back; dry-run shows `delay_ms`) and refuses when the recorded target
   is gone. Recordings are ffprobe-valid H.264; encoder errors are reported.
 - Dev: app launch/list/logs (cursor pagination, filter, `WAYLAND_DEBUG=client`),
   restart/stop (unknown processes refused). Tool filtering removes discovery

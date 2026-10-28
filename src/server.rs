@@ -13,6 +13,38 @@ use std::{collections::HashMap, io::Cursor, sync::{Arc, Mutex}};
 pub fn now_ms() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0) }
 pub fn err(msg: impl Into<String>) -> ErrorData { ErrorData::invalid_params(msg.into(), None) }
 pub fn json_result(v: &serde_json::Value) -> CallToolResult { CallToolResult::success(vec![ContentBlock::text(serde_json::to_string_pretty(v).unwrap_or_default())]) }
+
+/// Literal-substring or regex matcher over OCR word text, optionally case-insensitive.
+pub enum TextMatcher { Literal { needle: String, fold: bool }, Regex(regex::Regex) }
+impl TextMatcher {
+    pub fn new(query: &str, is_regex: bool, case_insensitive: bool) -> Result<Self, String> {
+        if is_regex {
+            regex::RegexBuilder::new(query).case_insensitive(case_insensitive).build().map(TextMatcher::Regex).map_err(|e| format!("invalid regex: {e}"))
+        } else if case_insensitive {
+            Ok(TextMatcher::Literal { needle: query.to_lowercase(), fold: true })
+        } else {
+            Ok(TextMatcher::Literal { needle: query.to_string(), fold: false })
+        }
+    }
+    pub fn is_match(&self, text: &str) -> bool {
+        match self { TextMatcher::Regex(r) => r.is_match(text), TextMatcher::Literal { needle, fold: true } => text.to_lowercase().contains(needle.as_str()), TextMatcher::Literal { needle, fold: false } => text.contains(needle.as_str()) }
+    }
+}
+
+/// Baseline pass decision for the changed-pixel count. No limits given = strict (zero changed pixels);
+/// otherwise every given limit must hold.
+pub fn baseline_within_limits(changed_pixels: u64, changed_ratio: f64, max_pixels: Option<u64>, max_ratio: Option<f64>) -> bool {
+    if max_pixels.is_none() && max_ratio.is_none() { return changed_pixels == 0; }
+    max_pixels.is_none_or(|m| changed_pixels <= m) && max_ratio.is_none_or(|m| changed_ratio <= m)
+}
+
+/// Delay before replay step i, from the previous and current recorded at_ms, minus time already
+/// spent dispatching the previous step, clamped to [0, max_gap_ms]. Missing timestamps or
+/// `timing:none` give 0.
+pub fn replay_gap_ms(prev_at: Option<u64>, at: Option<u64>, spent_prev_ms: u64, timing_recorded: bool, max_gap_ms: u64) -> u64 {
+    if !timing_recorded { return 0; }
+    match (prev_at, at) { (Some(a), Some(b)) => b.saturating_sub(a).saturating_sub(spent_prev_ms).min(max_gap_ms), _ => 0 }
+}
 pub fn encode_image(img: &RgbaImage, format: &str, max_dimension: Option<u32>) -> Result<(Vec<u8>, String, RgbaImage), String> {
     let mut img = img.clone();
     if let Some(maxd) = max_dimension {
@@ -113,9 +145,19 @@ pub struct DiffParams { pub shot_id: String, pub other_shot_id: Option<String>, 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadTextParams { pub shot_id: String, pub download_models: Option<bool> }
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct FindTextParams { pub shot_id: String, pub query: String, pub regex: Option<bool>, pub download_models: Option<bool> }
+pub struct FindTextParams {
+    pub shot_id: String, pub query: String, pub regex: Option<bool>, pub download_models: Option<bool>,
+    /// Ignore case when matching, for literal and regex queries (default false).
+    pub case_insensitive: Option<bool>,
+}
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct WaitTextParams { pub query: String, pub mode: Option<String>, pub timeout_ms: Option<u64>, pub poll_ms: Option<u64>, pub download_models: Option<bool> }
+pub struct WaitTextParams {
+    pub query: String, pub mode: Option<String>, pub timeout_ms: Option<u64>, pub poll_ms: Option<u64>, pub download_models: Option<bool>,
+    /// Ignore case when matching (default false).
+    pub case_insensitive: Option<bool>,
+    /// mode='disappear' only: treat text that is absent at the first capture as already satisfied (default false: returns satisfied:false reason 'not_present_at_start').
+    pub allow_absent_at_start: Option<bool>,
+}
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AppStateParams { pub max_dimension: Option<u32>, pub max_nodes: Option<usize> }
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -137,7 +179,13 @@ pub struct BaselineSaveParams { pub name: String, pub overwrite: Option<bool>, p
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RegionParam { pub x: u32, pub y: u32, pub width: u32, pub height: u32 }
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct BaselineCompareParams { pub name: String, pub threshold: Option<u8>, pub ignored_regions: Option<Vec<RegionParam>>, pub output: Option<String>, pub include_highlight: Option<bool> }
+pub struct BaselineCompareParams {
+    pub name: String, pub threshold: Option<u8>, pub ignored_regions: Option<Vec<RegionParam>>, pub output: Option<String>, pub include_highlight: Option<bool>,
+    /// Maximum changed pixels (after threshold and ignored_regions) that still passes. Default 0 (strict) when neither limit is given.
+    pub max_changed_pixels: Option<u64>,
+    /// Maximum changed fraction of all pixels (0.0-1.0) that still passes. When both limits are given, both must hold.
+    pub max_changed_ratio: Option<f64>,
+}
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ClipboardReadParams { pub mime: Option<String>, pub primary: Option<bool> }
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -181,7 +229,13 @@ pub struct BatchParams { pub steps: Vec<BatchStep>, pub stop_on_error: Option<bo
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TraceStartParams { pub include_images: Option<bool> }
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct TraceReplayParams { pub trace_id: Option<String>, pub path: Option<String>, pub dry_run: Option<bool> }
+pub struct TraceReplayParams {
+    pub trace_id: Option<String>, pub path: Option<String>, pub dry_run: Option<bool>,
+    /// 'recorded' (default): keep the recorded gap between consecutive steps; 'none': replay back-to-back.
+    pub timing: Option<String>,
+    /// Upper bound for any single replay gap in ms (default 10000, max 60000).
+    pub max_gap_ms: Option<u64>,
+}
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RecordStartParams { pub name: Option<String>, pub fps: Option<u32>, pub max_duration_ms: Option<u64>, pub output: Option<String>, pub include_indicator: Option<bool> }
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -554,7 +608,7 @@ impl Server {
         if let Some(h) = self.indicator.lock().unwrap().as_ref() { h.hide_ack(); }
     }
     pub fn batch_allowed(tool: &str) -> bool {
-        matches!(tool, "move" | "click" | "drag" | "scroll" | "mouse_button" | "key" | "key_hold" | "type_text" | "release_all" | "wait" | "screenshot" | "touch_tap" | "touch_swipe" | "touch_pinch" | "a11y_act" | "a11y_set_value" | "clipboard_write")
+        matches!(tool, "move" | "click" | "drag" | "scroll" | "mouse_button" | "key" | "key_hold" | "type_text" | "release_all" | "wait" | "wait_screen" | "screenshot" | "touch_tap" | "touch_swipe" | "touch_pinch" | "a11y_act" | "a11y_set_value" | "clipboard_write")
     }
     pub fn validate_batch_step(&self, step: &BatchStep) -> Result<(), ErrorData> {
         if step.tool == "batch" { return Err(err("nested batches are not allowed")); }
@@ -623,6 +677,9 @@ impl Server {
             "a11y_act" => { parse::<A11yActParams>(&step.tool, args)?; }
             "a11y_set_value" => { parse::<A11ySetValueParams>(&step.tool, args)?; }
             "clipboard_write" => { let p = parse::<ClipboardWriteParams>(&step.tool, args)?; check_target(p.target.as_deref())?; }
+            "wait_screen" => { let p = parse::<WaitScreenParams>(&step.tool, args)?;
+                if let Some(m) = p.mode.as_deref() { if m != "change" && m != "stable" { return Err(err(format!("unknown wait_screen mode '{m}'"))); } }
+                if p.timeout_ms.unwrap_or(0) > 60_000 { return Err(err("wait_screen timeout_ms is bounded to 60000")); } }
             _ => return Err(err(format!("tool '{}' cannot be validated for batch", step.tool))),
         }
         Ok(())
@@ -647,6 +704,7 @@ impl Server {
             "a11y_act" => self.a11y_act(Parameters(from::<A11yActParams>(tool, args)?)).await,
             "a11y_set_value" => self.a11y_set_value(Parameters(from::<A11ySetValueParams>(tool, args)?)).await,
             "clipboard_write" => self.clipboard_write(Parameters(from::<ClipboardWriteParams>(tool, args)?)).await,
+            "wait_screen" => self.wait_screen(Parameters(from::<WaitScreenParams>(tool, args)?)).await,
             other => Err(err(format!("tool '{other}' cannot be dispatched here"))),
         }
     }
@@ -1169,32 +1227,37 @@ impl Server {
     }
 
     /// Find OCR text by literal or regex query.
-    #[tool(description = "Search a screenshot's OCR text (literal substring, or regex:true). Returns all matching boxes/centers.", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
+    #[tool(description = "Search a screenshot's OCR text (literal substring, or regex:true; case_insensitive:true ignores case in either mode). Returns all matching boxes/centers.", annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true))]
     async fn find_text(&self, Parameters(p): Parameters<FindTextParams>) -> Result<CallToolResult, ErrorData> {
+        let matcher = TextMatcher::new(&p.query, p.regex == Some(true), p.case_insensitive == Some(true)).map_err(err)?;
         let (transform, words) = self.ocr_words(&p.shot_id, p.download_models.unwrap_or(false)).await?;
-        let re = if p.regex == Some(true) { Some(regex::Regex::new(&p.query).map_err(|e| err(format!("invalid regex: {e}")))?) } else { None };
         let mut matches = Vec::new();
         for w in &words {
-            let hit = match &re { Some(r) => r.is_match(&w.text), None => w.text.contains(&p.query) };
-            if hit { let (lx, ly) = transform.pixel_to_logical(w.center_px[0], w.center_px[1]).unwrap_or((0.0, 0.0)); matches.push(serde_json::json!({"text": w.text, "box_px": w.box_px, "center_px": w.center_px, "center_logical": [lx, ly]})); }
+            if matcher.is_match(&w.text) { let (lx, ly) = transform.pixel_to_logical(w.center_px[0], w.center_px[1]).unwrap_or((0.0, 0.0)); matches.push(serde_json::json!({"text": w.text, "box_px": w.box_px, "center_px": w.center_px, "center_logical": [lx, ly]})); }
         }
         Ok(json_result(&serde_json::json!({"shot_id": p.shot_id, "query": p.query, "matches": matches})))
     }
 
     /// Bounded wait for OCR text to appear/disappear on fresh captures.
-    #[tool(description = "Wait (bounded) for text to appear (mode='appear', default) or disappear on the active target, polling fresh captures with OCR. Timeout returns satisfied:false, not an error.", annotations(read_only_hint = true, destructive_hint = false))]
+    #[tool(description = "Wait (bounded) for text to appear (mode='appear', default) or disappear on the active target, polling fresh captures with OCR (literal substring; case_insensitive:true to ignore case). mode='disappear' requires the text to be on screen at the FIRST capture; otherwise it returns satisfied:false reason='not_present_at_start' immediately (typo or already gone) unless allow_absent_at_start:true. Timeout returns satisfied:false, not an error.", annotations(read_only_hint = true, destructive_hint = false))]
     async fn wait_for_text(&self, Parameters(p): Parameters<WaitTextParams>) -> Result<CallToolResult, ErrorData> {
+        let disappear = match p.mode.as_deref().unwrap_or("appear") { "appear" => false, "disappear" => true, other => return Err(err(format!("unknown wait_for_text mode '{other}' (use 'appear' or 'disappear')"))) };
+        let matcher = TextMatcher::new(&p.query, false, p.case_insensitive == Some(true)).map_err(err)?;
         let timeout = p.timeout_ms.unwrap_or(10_000).min(60_000);
         let poll = p.poll_ms.unwrap_or(500).max(100);
         let target = self.active_target(None)?;
         let started = std::time::Instant::now();
-        let mut last_shot = String::new();
+        let mut first = true;
         loop {
             let (t, _) = self.fresh_capture(&target, None).await?;
-            last_shot = t.shot_id.clone();
+            let last_shot = t.shot_id.clone();
             let (_, words) = self.ocr_words(&last_shot, p.download_models.unwrap_or(false)).await?;
-            let found = words.iter().any(|w| w.text.contains(&p.query));
-            let satisfied = if p.mode.as_deref() == Some("disappear") { !found } else { found };
+            let found = words.iter().any(|w| matcher.is_match(&w.text));
+            if disappear && first && !found && p.allow_absent_at_start != Some(true) {
+                return Ok(json_result(&serde_json::json!({"satisfied": false, "reason": "not_present_at_start", "query": p.query, "shot_id": last_shot, "elapsed_ms": started.elapsed().as_millis(), "note": "the text was not on screen at the first capture (typo, OCR miss, or already gone); pass allow_absent_at_start:true to treat that as success"})));
+            }
+            first = false;
+            let satisfied = if disappear { !found } else { found };
             if satisfied { return Ok(json_result(&serde_json::json!({"satisfied": true, "query": p.query, "shot_id": last_shot, "elapsed_ms": started.elapsed().as_millis()}))); }
             if started.elapsed().as_millis() as u64 >= timeout { return Ok(json_result(&serde_json::json!({"satisfied": false, "query": p.query, "shot_id": last_shot, "elapsed_ms": started.elapsed().as_millis(), "note": "timeout is a normal result, not an observation failure"}))); }
             tokio::time::sleep(std::time::Duration::from_millis(poll)).await;
@@ -1358,7 +1421,7 @@ impl Server {
     }
 
     /// Compare the current capture against a named baseline.
-    #[tool(description = "Compare current pixels to a named baseline with threshold and ignored regions. Returns pass/fail, size/layout mismatch and changed regions.", annotations(read_only_hint = true, destructive_hint = false))]
+    #[tool(description = "Compare current pixels to a named baseline with a per-channel threshold (default 8) and ignored regions. Default is strict: passes only if ZERO pixels differ (outside ignored_regions). To tolerate animation/caret/clock, mask them with ignored_regions, or pass max_changed_pixels and/or max_changed_ratio (pass when within every limit given). Returns pass/fail, the limits used, size/layout mismatch and changed regions.", annotations(read_only_hint = true, destructive_hint = false))]
     async fn baseline_compare(&self, Parameters(p): Parameters<BaselineCompareParams>) -> Result<CallToolResult, ErrorData> {
         let name = sanitize_name(&p.name).map_err(err)?;
         let dir = data_dir().join("baselines");
@@ -1372,8 +1435,12 @@ impl Server {
         let threshold = p.threshold.unwrap_or(8);
         let d = crate::media::diff_images(&base, &img, threshold, &ignored);
         let layout_mismatch = base_meta["transform"]["layout_generation"].as_u64().map(|g| g != t.layout_generation);
-        let pass = d.size_mismatch.is_none() && d.changed_ratio <= 0.001;
+        let max_pixels = p.max_changed_pixels;
+        let max_ratio = p.max_changed_ratio;
+        if let Some(r) = max_ratio { if !(r.is_finite() && (0.0..=1.0).contains(&r)) { return Err(err("max_changed_ratio must be between 0 and 1")); } }
+        let pass = d.size_mismatch.is_none() && baseline_within_limits(d.changed_pixels, d.changed_ratio, max_pixels, max_ratio);
         let mut out = serde_json::to_value(&d).unwrap();
+        out["limits"] = serde_json::json!({"max_changed_pixels": if max_pixels.is_none() && max_ratio.is_none() { Some(0) } else { max_pixels }, "max_changed_ratio": max_ratio, "threshold": threshold});
         out["pass"] = pass.into(); out["baseline"] = name.clone().into(); out["current_shot_id"] = t.shot_id.into(); out["layout_generation_mismatch"] = layout_mismatch.into(); out["baseline_meta"] = base_meta;
         if p.include_highlight == Some(true) && d.size_mismatch.is_none() {
             let hl = crate::media::highlight_diff(&base, &img, threshold, &ignored);
@@ -1614,22 +1681,24 @@ impl Server {
     #[tool(description = "Start a nested niri compositor as a private target: separate Wayland socket, private D-Bus session, accessibility bus and clipboard. This isolates desktop interaction, NOT filesystem/network access. Missing niri is a prerequisite error; no other compositor is substituted and the host is never taken over as a fallback.", annotations(destructive_hint = true))]
     async fn sandbox_start(&self, Parameters(p): Parameters<SandboxStartParams>) -> Result<CallToolResult, ErrorData> {
         let id = { let mut c = self.counters.lock().unwrap(); c.0 += 1; format!("sandbox-{}-{}", std::process::id(), c.0) };
+        let (req_w, req_h) = (p.width.unwrap_or(1280), p.height.unwrap_or(720));
         // Registration happens inside a detached task that owns the maps:
         // even if this request is cancelled while the blocking start runs,
         // the finished sandbox is registered (and thus reachable by
         // shutdown_cleanup) instead of being dropped and orphaned.
-        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(String, String), String>>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<(String, String, crate::apps::HostWindowOutcome), String>>();
         {
             let me = self.clone();
             let id2 = id.clone();
             tokio::spawn(async move {
-                let started = tokio::task::spawn_blocking({ let id3 = id2.clone(); move || crate::apps::start_sandbox(&id3, p.width.unwrap_or(1280), p.height.unwrap_or(720)) }).await;
+                let started = tokio::task::spawn_blocking({ let id3 = id2.clone(); move || crate::apps::start_sandbox(&id3, req_w, req_h) }).await;
                 let result = match started {
                     Ok(Ok((sb, spec, bus))) => {
                         let socket = spec.socket.clone();
+                        let host_window = sb.host_window.clone();
                         { let mut s = me.session.lock().unwrap(); s.targets.insert(id2.clone(), spec); }
                         me.sandboxes.lock().unwrap().insert(id2.clone(), sb);
-                        Ok((socket.to_string_lossy().to_string(), bus))
+                        Ok((socket.to_string_lossy().to_string(), bus, host_window))
                     }
                     Ok(Err(e)) => Err(e),
                     Err(e) => Err(e.to_string()),
@@ -1637,10 +1706,16 @@ impl Server {
                 let _ = tx.send(result);
             });
         }
-        let (socket, bus) = rx.await.map_err(|_| err("sandbox start task ended without reporting a result"))?.map_err(err)?;
+        let (socket, bus, host_window) = rx.await.map_err(|_| err("sandbox start task ended without reporting a result"))?.map_err(err)?;
         // Report effective geometry from the target itself.
-        let info = wayland::discover(&self.active_target(Some(&id))?).map(|d| serde_json::to_value(&d.outputs).unwrap_or_default()).unwrap_or(serde_json::json!({"error": "discovery after start failed"}));
-        Ok(json_result(&serde_json::json!({"target": id, "kind": "sandbox", "socket": socket, "session_bus": bus, "outputs": info, "note": "Use target_select to make it active, or pass target explicitly where supported. Desktop-interaction isolation only."})))
+        let disc = wayland::discover(&self.active_target(Some(&id))?);
+        let info = disc.as_ref().map(|d| serde_json::to_value(&d.outputs).unwrap_or_default()).unwrap_or(serde_json::json!({"error": "discovery after start failed"}));
+        let mut body = serde_json::json!({"target": id, "kind": "sandbox", "socket": socket, "session_bus": bus, "outputs": info, "requested": {"width": req_w, "height": req_h}, "host_window": host_window, "note": "Use target_select to make it active, or pass target explicitly where supported. Desktop-interaction isolation only. A Flipped180 transform on the nested winit output is what nested niri advertises, and captures already correct for it."});
+        if !disc.as_ref().is_ok_and(|d| d.outputs.iter().any(|o| i64::from(o.logical.width) == i64::from(req_w) && i64::from(o.logical.height) == i64::from(req_h))) {
+            body["size_mismatch"] = serde_json::json!(true);
+            body["size_note"] = serde_json::json!("No discovered output has the requested logical width and height: the nested compositor is a window on the host, and the host compositor decides its size; automatic resize is supported only on a niri host, where the window is floated and resized.");
+        }
+        Ok(json_result(&body))
     }
 
     /// Stop a sandbox target: owned apps/compositor/buses only.
@@ -1745,7 +1820,7 @@ impl Server {
     }
 
     /// Typed ordered action batch: fully validated before starting, sequential, per-step status.
-    #[tool(description = "Run a typed ordered action list. EVERY step is validated before the first dispatch; execution is sequential with per-step status and completed count; stops at the first error by default (stop_on_error:false to continue). No nested batches and no process/D-Bus/sandbox/target operations inside a batch. No rollback is claimed.", annotations(destructive_hint = true))]
+    #[tool(description = "Run a typed ordered action list. EVERY step is validated before the first dispatch; execution is sequential with per-step status and completed count; stops at the first error by default (stop_on_error:false to continue). Each ok step's `result` is its parsed JSON output (e.g. a screenshot's shot_id/transform) or its full text; image blocks produced by steps (screenshot) are appended after the JSON summary and referenced by the step's `image_index`. wait_screen is allowed as a step. No nested batches and no process/D-Bus/sandbox/target operations inside a batch. No rollback is claimed.", annotations(destructive_hint = true))]
     async fn batch(&self, Parameters(p): Parameters<BatchParams>) -> Result<CallToolResult, ErrorData> {
         if p.steps.is_empty() { return Err(err("batch steps must not be empty")); }
         if p.steps.len() > 100 { return Err(err("batch is bounded to 100 steps")); }
@@ -1755,6 +1830,7 @@ impl Server {
         }
         let stop = p.stop_on_error.unwrap_or(true);
         let mut results = Vec::new();
+        let mut images: Vec<ContentBlock> = Vec::new();
         let mut completed = 0usize;
         for (i, step) in p.steps.iter().enumerate() {
             let args = step.arguments.clone().unwrap_or(serde_json::json!({}));
@@ -1772,8 +1848,11 @@ impl Server {
                     // replayable; failed/partial steps leave no event
                     // (transcribe-l7v.3).
                     self.record_event("batch_step", serde_json::json!({"tool": step.tool, "target": step_target, "status": "ok"}), Some(args));
-                    let text: String = res.content.iter().filter_map(|c| match c { ContentBlock::Text(t) => Some(t.text.clone()), ContentBlock::Image(_) => Some("[image]".into()), _ => None }).collect::<Vec<_>>().join(" ").chars().take(300).collect();
-                    results.push(serde_json::json!({"step": i, "tool": step.tool, "status": "ok", "result": text}));
+                    let text = res.content.iter().filter_map(|c| match c { ContentBlock::Text(t) => Some(t.text.as_str()), _ => None }).collect::<Vec<_>>().join(" ");
+                    let result = serde_json::from_str::<serde_json::Value>(&text).unwrap_or(serde_json::Value::String(text));
+                    let mut entry = serde_json::json!({"step": i, "tool": step.tool, "status": "ok", "result": result});
+                    if let Some(img) = res.content.iter().find(|c| matches!(c, ContentBlock::Image(_))) { entry["image_index"] = images.len().into(); images.push(img.clone()); }
+                    results.push(entry);
                     completed += 1;
                 }
                 Err(e) => {
@@ -1782,7 +1861,9 @@ impl Server {
                 }
             }
         }
-        Ok(json_result(&serde_json::json!({"completed": completed, "total": p.steps.len(), "stopped_on_error": stop, "results": results, "note": "completed prefix is real; no rollback is claimed for it"})))
+        let mut contents = vec![ContentBlock::text(serde_json::to_string_pretty(&serde_json::json!({"completed": completed, "total": p.steps.len(), "stopped_on_error": stop, "results": results, "images": images.len(), "note": "completed prefix is real; no rollback is claimed for it. Image blocks follow this summary in order; a step's image_index points into them."})).unwrap())];
+        contents.extend(images);
+        Ok(CallToolResult::success(contents))
     }
 
     /// Start an opt-in trace of server-issued actions.
@@ -1810,8 +1891,11 @@ impl Server {
     }
 
     /// Explicit replay of a trace; dry-run supported; layout mismatch is rejected. Potentially destructive.
-    #[tool(description = "Replay a recorded trace (by trace_id or path). Explicit and potentially destructive: dry_run:true only reports the plan. Non-dry-run requires the recorded target and output layout to match the current ones, or it refuses. Never replays automatically after a failure. Typed text is redacted in traces and is skipped, reported as non-replayable.", annotations(destructive_hint = true))]
+    #[tool(description = "Replay a recorded trace (by trace_id or path). Explicit and potentially destructive: dry_run:true only reports the plan (including each step's delay_ms). Non-dry-run requires the recorded target and output layout to match the current ones, or it refuses. Timing: by default (timing='recorded') the replay keeps the recorded gap between consecutive steps (minus time already spent dispatching the previous step), each gap clamped to max_gap_ms (default 10000, max 60000); timing='none' replays back-to-back. Traces without timestamps replay with no gaps. Never replays automatically after a failure. Typed text is redacted in traces and is skipped, reported as non-replayable.", annotations(destructive_hint = true))]
     async fn trace_replay(&self, Parameters(p): Parameters<TraceReplayParams>) -> Result<CallToolResult, ErrorData> {
+        let timing = p.timing.as_deref().unwrap_or("recorded");
+        let timing_recorded = match timing { "recorded" => true, "none" => false, other => return Err(err(format!("unknown timing '{other}' (use 'recorded' or 'none')"))) };
+        let max_gap_ms = p.max_gap_ms.unwrap_or(10_000).min(60_000);
         let path = match (&p.path, &p.trace_id) {
             (Some(path), _) => std::path::PathBuf::from(path),
             (None, Some(id)) => data_dir().join("traces").join(format!("{}.jsonl", sanitize_name(id).map_err(err)?)),
@@ -1851,6 +1935,8 @@ impl Server {
         let mut plan: Vec<(String, serde_json::Value)> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
         let mut unreplayable: Vec<String> = Vec::new();
+        // Recorded at_ms of the event each plan step came from (None for old traces).
+        let mut plan_at: Vec<Option<u64>> = Vec::new();
         for event in &events {
             let event_target = event["target"].as_str().unwrap_or(&recorded_target).to_string();
             let tool_name = event["tool"].as_str().unwrap_or("").to_string();
@@ -1921,9 +2007,11 @@ impl Server {
                 "type_text" => skipped.push("type_text (text redacted in trace; non-replayable)".into()),
                 other => unreplayable.push(format!("{other} (not exactly reconstructable from its recorded summary)")),
             }
+            while plan_at.len() < plan.len() { plan_at.push(event["at_ms"].as_u64()); }
         }
         if p.dry_run == Some(true) {
-            return Ok(json_result(&serde_json::json!({"dry_run": true, "recorded_target": recorded_target, "recorded_targets": distinct_targets, "planned": plan.iter().map(|(t, a)| serde_json::json!({"tool": t, "arguments": a})).collect::<Vec<_>>(), "skipped_non_replayable": skipped, "unreplayable": unreplayable})));
+            let planned: Vec<serde_json::Value> = plan.iter().enumerate().map(|(i, (t, a))| serde_json::json!({"tool": t, "arguments": a, "delay_ms": if i == 0 { 0 } else { replay_gap_ms(plan_at[i - 1], plan_at[i], 0, timing_recorded, max_gap_ms) }})).collect();
+            return Ok(json_result(&serde_json::json!({"dry_run": true, "timing": timing, "max_gap_ms": max_gap_ms, "recorded_target": recorded_target, "recorded_targets": distinct_targets, "planned": planned, "skipped_non_replayable": skipped, "unreplayable": unreplayable})));
         }
         if !unreplayable.is_empty() { return Err(err(format!("trace contains events that cannot be reconstructed exactly {unreplayable:?}; refusing replay before dispatching anything (no partial replay of a different action sequence)"))); }
         if recorded_target.is_empty() { return Err(err("trace records no target; refusing replay")); }
@@ -1965,11 +2053,19 @@ impl Server {
             if let Err(e) = self.validate_batch_step(&step) { return Err(err(format!("replay step {} ({tool}) no longer validates, refusing before any replay step executes: {e:?}", idx + 1))); }
         }
         let mut executed = 0usize;
-        for (tool, args) in &plan {
+        let mut spent_prev_ms = 0u64;
+        let mut slept_total_ms = 0u64;
+        for (i, (tool, args)) in plan.iter().enumerate() {
+            if i > 0 {
+                let delay = replay_gap_ms(plan_at[i - 1], plan_at[i], spent_prev_ms, timing_recorded, max_gap_ms);
+                if delay > 0 { slept_total_ms += delay; tokio::time::sleep(std::time::Duration::from_millis(delay)).await; }
+            }
+            let step_started = std::time::Instant::now();
             self.dispatch_action(tool, args.clone()).await.map_err(|e| err(format!("replay stopped at step {} ({tool}): {e:?}; completed prefix stays executed, nothing is auto-replayed", executed + 1)))?;
+            spent_prev_ms = step_started.elapsed().as_millis() as u64;
             executed += 1;
         }
-        Ok(json_result(&serde_json::json!({"replayed": executed, "skipped_non_replayable": skipped, "target": target.id})))
+        Ok(json_result(&serde_json::json!({"replayed": executed, "timing": timing, "max_gap_ms": max_gap_ms, "slept_ms": slept_total_ms, "skipped_non_replayable": skipped, "target": target.id})))
     }
 
     /// Start an ffmpeg screen recording (runs independently of this response).
@@ -2048,6 +2144,49 @@ pub fn draw_grid(img: &mut RgbaImage, t: &crate::coords::ShotTransform) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_matcher_case_handling() {
+        let m = TextMatcher::new("Save", false, false).unwrap();
+        assert!(m.is_match("Save As") && !m.is_match("save as"));
+        let m = TextMatcher::new("Save", false, true).unwrap();
+        assert!(m.is_match("SAVE AS") && m.is_match("unsaved") && !m.is_match("sav"));
+        let m = TextMatcher::new("^sa.e$", true, false).unwrap();
+        assert!(m.is_match("save") && !m.is_match("Save"));
+        let m = TextMatcher::new("^sa.e$", true, true).unwrap();
+        assert!(m.is_match("SAVE"));
+        assert!(TextMatcher::new("(", true, false).is_err());
+    }
+    #[test]
+    fn baseline_limits_decision() {
+        // default: strict zero
+        assert!(baseline_within_limits(0, 0.0, None, None));
+        assert!(!baseline_within_limits(1, 1e-9, None, None));
+        // pixel limit only
+        assert!(baseline_within_limits(10, 0.5, Some(10), None));
+        assert!(!baseline_within_limits(11, 0.0, Some(10), None));
+        // ratio limit only
+        assert!(baseline_within_limits(500, 0.001, None, Some(0.001)));
+        assert!(!baseline_within_limits(0, 0.002, None, Some(0.001)));
+        // both must hold
+        assert!(!baseline_within_limits(5, 0.5, Some(10), Some(0.1)));
+        assert!(baseline_within_limits(5, 0.05, Some(10), Some(0.1)));
+    }
+    #[test]
+    fn replay_gap_computation() {
+        // keeps recorded gap, minus time already spent
+        assert_eq!(replay_gap_ms(Some(1000), Some(1500), 0, true, 10_000), 500);
+        assert_eq!(replay_gap_ms(Some(1000), Some(1500), 200, true, 10_000), 300);
+        assert_eq!(replay_gap_ms(Some(1000), Some(1500), 900, true, 10_000), 0);
+        // clamped to max_gap_ms
+        assert_eq!(replay_gap_ms(Some(0), Some(60_000), 0, true, 10_000), 10_000);
+        assert_eq!(replay_gap_ms(Some(0), Some(20_000), 5_000, true, 10_000), 10_000);
+        // missing at_ms or backwards clock: no gap
+        assert_eq!(replay_gap_ms(None, Some(5), 0, true, 10_000), 0);
+        assert_eq!(replay_gap_ms(Some(5), None, 0, true, 10_000), 0);
+        assert_eq!(replay_gap_ms(Some(2000), Some(1000), 0, true, 10_000), 0);
+        // timing none
+        assert_eq!(replay_gap_ms(Some(0), Some(5000), 0, false, 10_000), 0);
+    }
     #[test]
     fn encode_image_preserves_aspect_ratio() {
         let img = RgbaImage::new(1920, 1080);
