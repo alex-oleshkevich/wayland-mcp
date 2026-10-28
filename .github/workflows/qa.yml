@@ -51,13 +51,3 @@ jobs:
       # Not a gate yet; keeps warnings visible.
       - name: Clippy (not gated)
         run: cargo clippy --all-targets
-
-  # wayland-mcp is Linux-only at runtime; this keeps the macOS release build compiling.
-  macos:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check
-        run: cargo check --release

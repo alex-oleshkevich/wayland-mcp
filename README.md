@@ -48,9 +48,8 @@ network access.
 
 ## Installation
 
-wayland-mcp runs on Linux with a Wayland session. The macOS builds on the
-releases page exist only so the project builds everywhere; they print an
-"unsupported platform" error and exit.
+wayland-mcp runs on Linux with a Wayland session. Release builds are
+published for Linux only.
 
 The quickest way to install is the install script. It downloads the latest
 release for your CPU (amd64 or arm64), checks its SHA-256 checksum and puts
