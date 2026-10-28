@@ -3,10 +3,26 @@
 Status and claims: see the Validation matrix in [REFERENCE.md](REFERENCE.md).
 This file covers how to run the checks and where each area is verified.
 
-## Unit tests
+## Non-VM checks
 
 ```bash
+cargo build
 cargo test
+cargo clippy --all-targets
+```
+
+Unit tests live beside their implementations. `tests/cli.rs` exercises the
+compiled CLI without a Wayland display: named-tool text/JSON schemas, unknown
+names and suggestions, filtered discovery, and incompatible output flags.
+The agent guide text is not snapshot-tested.
+
+For a read-only smoke check inside a live Wayland session:
+
+```bash
+./target/debug/wayland-mcp prime
+./target/debug/wayland-mcp tools screenshot
+./target/debug/wayland-mcp tools nope             # JSON error on stderr; exit 1
+./target/debug/wayland-mcp call wayland_globals '{"filter":"screencopy"}'
 ```
 
 ## Live batteries (`.vmtest/`)

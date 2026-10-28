@@ -23,6 +23,54 @@ cargo build --release
 Unknown names in `--tools`/`--exclude-tools` fail startup. Filtering removes
 both discovery entries and dispatch routes.
 
+### Shell commands
+
+```bash
+wayland-mcp prime                         # agent guide + generated filtered tool index
+wayland-mcp doctor                        # read-only capability table
+wayland-mcp tools [--names]               # filtered index
+wayland-mcp tools screenshot [--json]     # full description + input schema
+wayland-mcp call screenshot '{"max_dimension":1200}' -o shot.png
+```
+
+Schemas come from the server's router. Unknown or filtered-out schema names
+produce a JSON error on stderr and exit 1; close-match suggestions use only
+visible tools. `--json` requires a tool name and cannot combine with `--names`.
+`call` accepts one JSON object (default `{}`), uses real MCP dispatch and saves
+only the first returned image with `-o`. Text/JSON goes to stdout; errors and
+image notices go to stderr. No image with `-o` or an output write failure exits 1.
+Malformed/non-object call JSON and CLI usage errors exit 2. Dispatch/tool errors
+exit 1; `doctor` also exits 1 for an unreachable Wayland socket/registry. Inspect
+normal results for `satisfied:false`, batch validation errors and failed steps;
+these do not by themselves change exit 0.
+
+### CLI parity
+
+| MCP capability | CLI coverage / boundary |
+|---|---|
+| Tool discovery and input schemas | Covered: `tools`, `tools --names`, `tools NAME [--json]`; `prime` appends the generated filtered index. |
+| Tool calls and filters | Covered: every registered tool dispatches through `call`, with the same `--tools`/`--exclude-tools` policy, including nested batch/replay checks. |
+| Images | Covered: `-o FILE` saves the first image, with notices for additional images; it does not export every image in a multi-image result. |
+| Resources and resource subscriptions | Not implemented by the server; no advertised resources or resource routes to expose. |
+| Prompts and completion | Not implemented by the server; no prompt/completion handlers to expose. |
+| Progress/logging/list-change notifications | Not emitted by the server; there is no progress stream to forward. CLI diagnostics already use stderr. |
+| Sandboxes, selected targets, owned app ids/logs | Connection-scoped: each call starts on host; cleanup stops owned apps/sandboxes. Use persistent MCP stdio for their lifecycle. |
+| Retained shots, layout tracking and shot-based OCR/diffs/input | Connection-scoped: prior-call shot ids are invalid. Use transform-based logical coordinates, same-call OCR marks or a persistent MCP connection. |
+| Held input and clipboard ownership | Released/closed at call cleanup. Complete gestures/chords, paste mode where supported, or one batch can keep related actions together. Clipboard-manager persistence is not guaranteed. |
+| Portal approval, backend devices and indicator | Connection-scoped: closed at cleanup; a new portal call can ask again. One batch can share consent across its allowed steps. |
+| Active traces and recording handles | Connection-scoped: start/stop cannot span shell calls; recordings stop at cleanup. Use persistent MCP stdio. Disk artifacts remain readable; trace replay still validates target/layout/arguments. |
+| Batch result references and image export | Not implemented by the server: batch prevalidates static arguments, permits only its action whitelist, and summarizes images as text. No new CLI batch semantics are invented. |
+
+No daemon/background broker is introduced. The fresh-server boundary is
+intentional: it prevents leaking owned processes/input and cannot be removed
+without a different connection-lifetime model. Named baselines can be saved and
+compared across calls because they are files. AT-SPI refs identify external live
+bus objects rather than server-owned handles and may remain usable while those
+objects exist. Desktop mutations are not rolled back.
+
+Run `wayland-mcp prime` for coordinate conversion and shell workflow details;
+install the agent skill with `npx skills add alex-oleshkevich/wayland-mcp`.
+
 ## Targets
 
 - `host`: the desktop the server was started on (`WAYLAND_DISPLAY`).

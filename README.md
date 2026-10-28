@@ -116,6 +116,21 @@ For clients that use an `mcpServers` JSON file:
 Leave out `--portal` unless you're on GNOME or KDE and want the agent to
 control your real desktop.
 
+### As an agent skill
+
+Install the shell-facing skill with:
+
+```bash
+npx skills add alex-oleshkevich/wayland-mcp
+```
+
+The skill tells the agent to run `wayland-mcp prime` for the usage guide and
+generated tool index. It needs the binary installed and access to your Wayland
+session, but no MCP client configuration. For in-process GTK4/libadwaita widget
+inspection, use [gtk-mcp](https://github.com/alex-oleshkevich/gtk-mcp) instead.
+
+### Command-line interface
+
 Options:
 
 | Flag | Effect |
@@ -142,20 +157,52 @@ variable: `WAYLAND_MCP_PORTAL`, `WAYLAND_MCP_PORTAL_TIMEOUT_MS`,
 `true`/`false`, `yes`/`no`). A flag on the command line wins over its
 variable. `wayland-mcp --help` lists everything.
 
-Three subcommands help with setup and scripting. They take the same options as the server.
+The CLI supports setup, discovery and one-shot scripting. Subcommands take the
+same global options as the server.
 
 ```bash
+wayland-mcp prime           # shell agent guide plus the filtered tool index
 wayland-mcp doctor          # what works on this desktop (call doctor for raw JSON)
 wayland-mcp tools           # tools a client would see; --names for names only
+wayland-mcp tools screenshot
+wayland-mcp tools click --json
 wayland-mcp --exclude-tools record_start tools --names
 wayland-mcp call wayland_globals '{"filter":"screencopy"}'
 wayland-mcp call screenshot '{"max_dimension":400}' -o shot.png
 ```
 
+`tools NAME` shows the full description and input JSON schema from the filtered
+MCP dispatch router. Add `--json` for `name`, `description` and `input_schema`.
+An unknown or hidden name produces a JSON error on stderr and exits 1, with
+close-match suggestions when available. `tools` and `tools --names` retain
+their index formats.
+
 `doctor` only reads: it never shows a consent dialog, downloads anything or
 changes settings. It exits 1 when it can't reach the Wayland session at all.
 
-`call` runs one tool through the normal MCP dispatch and prints the result (`-o FILE` saves the first image). Each call starts a fresh server, so sandboxes, shot ids and traces do not carry over between calls. The result goes to stdout and errors to stderr. It exits 1 when the call fails (unknown tool, invalid arguments, a tool error, or for `doctor` an unreachable Wayland session) and 2 when the argument is not a JSON object. Input tools such as `click` or `type_text` act on your real desktop, because a call always targets the host.
+`call` runs one tool through the normal MCP dispatch and prints text/JSON results
+to stdout, errors/image notices to stderr. `-o FILE` saves the first returned
+image; it fails if there is no image. Additional images are skipped with a notice.
+Without `-o`, image bytes are not printed. It exits 1 for dispatch/tool errors,
+image output failures, or an unreachable Wayland session from `doctor`; malformed
+JSON, non-object arguments and CLI usage errors exit 2. Result-level failures
+such as `satisfied:false` or batch validation/step errors require inspecting
+the result even when the exit is 0.
+
+Each call starts a fresh server on `host`. Sandboxes, selected targets, shot
+images/ids, held input, clipboard ownership, owned apps/logs, portal sessions,
+active traces and recording handles do not carry over. Cleanup stops owned apps,
+sandboxes and recordings and releases input/clipboard connections. Disk artifacts
+remain; typed text and other desktop effects are not rolled back.
+
+Use explicit logical coordinates for input across shell calls; `prime` explains
+how to convert screenshot pixels with the returned transform, including scaling
+and output origins. An action's `observe` can return a verification image in the
+same call. `batch` shares one call's input/clipboard state, but cannot run sandbox,
+app, trace or recording lifecycle tools, substitute results into later arguments,
+or return screenshot image blocks. Use a persistent MCP stdio connection for
+those workflows, retained-shot OCR/diffs and multi-call recordings. There is no
+CLI daemon or broker. See [CLI parity](REFERENCE.md#cli-parity) for the boundaries.
 
 ## Usage
 

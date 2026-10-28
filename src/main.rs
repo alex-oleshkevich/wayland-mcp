@@ -90,17 +90,27 @@ enum Command {
     /// Check what works on this desktop (read-only; never prompts, downloads
     /// or changes settings). Exits 1 when the Wayland session is unreachable.
     Doctor,
-    /// List the tools a client would see, after --tools/--exclude-tools.
+    /// Print a guide for AI agents driving wayland-mcp from the shell.
+    Prime,
+    /// List tools, or show one tool's description and input JSON schema.
     Tools {
+        /// Tool name; omitted to list tools after --tools/--exclude-tools.
+        #[arg(conflicts_with = "names")]
+        name: Option<String>,
         /// Print only the names, one per line.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "json")]
         names: bool,
+        /// Print the named tool's definition as JSON.
+        #[arg(long, requires = "name")]
+        json: bool,
     },
     /// Run one tool through the real MCP dispatch and print the result.
     ///
     /// Starts a fresh in-process server for this call and shuts it down
-    /// afterwards, so state (sandboxes, shot ids, traces) does not carry over
-    /// between calls. The result goes to stdout; errors go to stderr. Exits 1
+    /// afterwards. Sandboxes, selected targets, shot ids, held input, clipboard
+    /// ownership, launched apps/logs, portal sessions, active traces and recording
+    /// handles do not carry over between calls. Saved artifacts remain on disk.
+    /// The result goes to stdout; errors go to stderr. Exits 1
     /// when the call fails (unknown tool, invalid arguments, tool error, or for
     /// `doctor` an unreachable Wayland session) and 2 when JSON is not a JSON
     /// object.
@@ -114,6 +124,61 @@ enum Command {
         #[arg(short, long, value_name = "FILE")]
         output: Option<std::path::PathBuf>,
     },
+}
+
+/// The same filtered index is used by `tools` and appended to `prime`.
+#[cfg(target_os = "linux")]
+fn tool_index(server: &server::Server, names: bool) -> String {
+    use std::fmt::Write as _;
+    let tools = server.tool_list();
+    let width = tools.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    let mut out = String::new();
+    for (name, desc) in tools {
+        if names { let _ = writeln!(out, "{name}"); } else {
+            let short = desc.split(". ").next().unwrap_or("").trim_end_matches('.');
+            let _ = writeln!(out, "{name:<width$}  {short}");
+        }
+    }
+    out
+}
+
+/// Read schemas from the dispatch router, never from a parallel CLI registry.
+#[cfg(target_os = "linux")]
+fn tool_definition(server: &server::Server, name: &str) -> Result<serde_json::Value, rmcp::ErrorData> {
+    let tools = server.tool_router.list_all();
+    if let Some(tool) = tools.iter().find(|tool| tool.name == name) {
+        return Ok(serde_json::json!({
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": tool.input_schema,
+        }));
+    }
+    // Tool identifiers are ASCII. Reuse one edit-distance row for all candidates.
+    let mut row = vec![0usize; name.len() + 1];
+    let mut close = Vec::new();
+    for tool in &tools {
+        for (i, cell) in row.iter_mut().enumerate() { *cell = i; }
+        for (i, a) in tool.name.bytes().enumerate() {
+            let mut diagonal = row[0];
+            row[0] = i + 1;
+            for (j, b) in name.bytes().enumerate() {
+                let above = row[j + 1];
+                row[j + 1] = (above + 1).min(row[j] + 1).min(diagonal + usize::from(a != b));
+                diagonal = above;
+            }
+        }
+        let distance = row[name.len()];
+        if distance <= 3 { close.push((distance, tool.name.as_ref())); }
+    }
+    close.sort_unstable();
+    let suggestions: Vec<_> = close.into_iter().take(3).map(|(_, name)| name).collect();
+    let hint = if suggestions.is_empty() {
+        "run `wayland-mcp tools` to list available tools".to_string()
+    } else { format!("did you mean: {}?", suggestions.join(", ")) };
+    Err(rmcp::ErrorData::invalid_params(
+        format!("unknown tool '{name}'; {hint}"),
+        Some(serde_json::json!({"suggestions": suggestions})),
+    ))
 }
 
 /// True when the server could not work at all: no Wayland socket or registry.
@@ -289,16 +354,23 @@ async fn main() -> anyhow::Result<()> {
     let session = Arc::new(Mutex::new(Session::new()));
     let server = server::Server::new(session, include, exclude).map_err(|e| anyhow::anyhow!(e))?;
     match cli.command {
-        Some(Command::Tools { names }) => {
-            let tools = server.tool_list();
-            let width = tools.iter().map(|(n, _)| n.len()).max().unwrap_or(0);
-            for (name, desc) in tools {
-                if names { println!("{name}"); } else {
-                    // First sentence keeps the listing to one line per tool.
-                    let short = desc.split(". ").next().unwrap_or("").trim_end_matches('.');
-                    println!("{name:<width$}  {short}");
+        Some(Command::Prime) => {
+            print!("{}\n\n## Tool index\n\n```text\n{}```\n", include_str!("prime.md").trim_end(), tool_index(&server, false));
+            return Ok(());
+        }
+        Some(Command::Tools { name, names, json }) => {
+            if let Some(name) = name {
+                match tool_definition(&server, &name) {
+                    Ok(definition) if json => println!("{}", serde_json::to_string_pretty(&definition)?),
+                    Ok(definition) => println!("{}\n{}\n\nARGS_JSON schema:\n{}", name,
+                        definition["description"].as_str().unwrap_or(""),
+                        serde_json::to_string_pretty(&definition["input_schema"])?),
+                    Err(error) => {
+                        eprintln!("{}", serde_json::to_string(&error)?);
+                        std::process::exit(1);
+                    }
                 }
-            }
+            } else { print!("{}", tool_index(&server, names)); }
             return Ok(());
         }
         Some(Command::Doctor) => {
