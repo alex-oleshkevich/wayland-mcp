@@ -1,6 +1,6 @@
 [package]
 name = "wayland-mcp"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 license = "MIT"
 description = "Capability-based Wayland computer-use MCP server (rmcp, stdio)"
