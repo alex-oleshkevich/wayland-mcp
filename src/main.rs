@@ -11,8 +11,6 @@ mod input;
 #[cfg(target_os = "linux")]
 mod indicator;
 #[cfg(target_os = "linux")]
-mod dbus;
-#[cfg(target_os = "linux")]
 mod server;
 #[cfg(target_os = "linux")]
 mod media;
@@ -82,6 +80,14 @@ struct Cli {
     /// Do not draw the on-screen overlay that shows what the agent is doing.
     #[arg(long, global = true, env = "WAYLAND_MCP_NO_INDICATOR", value_parser = clap::builder::BoolishValueParser::new())]
     no_indicator: bool,
+    /// How many recent actions the on-screen overlay lists (newest on top).
+    #[arg(long, global = true, env = "WAYLAND_MCP_INDICATOR_HISTORY", default_value_t = 5, value_name = "N",
+          value_parser = clap::value_parser!(u8).range(1..=20))]
+    indicator_history: u8,
+    /// How long each action stays on the on-screen overlay.
+    #[arg(long, global = true, env = "WAYLAND_MCP_INDICATOR_TTL_MS", default_value_t = 3000, value_name = "MS",
+          value_parser = clap::value_parser!(u64).range(500..=60_000))]
+    indicator_ttl_ms: u64,
 }
 
 #[cfg(target_os = "linux")]
@@ -348,6 +354,8 @@ async fn main() -> anyhow::Result<()> {
         touch_uinput: cli.touch_uinput,
         ocr_dir: cli.ocr_dir,
         indicator: !cli.no_indicator,
+        indicator_history: cli.indicator_history.into(),
+        indicator_ttl_ms: cli.indicator_ttl_ms,
     });
     let exclude: Vec<String> = cli.exclude_tools.into_iter().filter(|s| !s.is_empty()).collect();
     let include: Option<Vec<String>> = cli.tools.map(|v| v.into_iter().filter(|s| !s.is_empty()).collect());

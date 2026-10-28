@@ -50,7 +50,7 @@ Without `-o`, image bytes are not printed: save and view the file.
 
 All subcommands accept the server's global flags: `--tools A,B`,
 `--exclude-tools A,B`, `--portal`, `--portal-timeout-ms MS`, `--touch-uinput MAPPING`,
-`--ocr-dir DIR`, `--no-indicator`. Filters affect listing, schemas and dispatch,
+`--ocr-dir DIR`, `--no-indicator`, `--indicator-history N`, `--indicator-ttl-ms MS` (default 3000). Filters affect listing, schemas and dispatch,
 including batch/replay; unknown filter names fail startup. `--help` describes
 flags and environment variables. Without a subcommand, the binary runs a
 persistent MCP server over stdin/stdout, with diagnostics on stderr.
@@ -191,6 +191,9 @@ applying them; apply only with `confirm_desktop_change:true` when authorized.
 
 Screenshots, logs, traces and recordings can contain secrets. Traces redact text
 arguments, but not all context. Keep artifacts private. The activity indicator
+shows text typed with type_text (`Type: ...`), visible on screen and in
+recordings with include_indicator; bare key presses show as `*`. When typing
+secrets use `--no-indicator` or record with include_indicator:false. It
 is best-effort and can be disabled; its absence is not proof that nothing ran.
 The server advertises tools only: no MCP resources, prompts or progress/logging
 notifications are implemented. Tool descriptions/schemas and the filtered index

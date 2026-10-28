@@ -41,7 +41,7 @@ sandbox to your real desktop.
 - Check what the current desktop supports with `doctor`, which only reads and
   never changes anything.
 
-There are 50 tools in all. [REFERENCE.md](REFERENCE.md) lists them by group.
+There are 49 tools in all. [REFERENCE.md](REFERENCE.md) lists them by group.
 
 The sandbox only keeps the agent off your desktop. It doesn't restrict files or
 network access.
@@ -140,6 +140,8 @@ Options:
 | `--touch-uinput <MAPPING>` | Maps a touchscreen device for touch input, as `/dev/input/eventN:WIDTHxHEIGHT@OUTPUT`. |
 | `--ocr-dir <DIR>` | Where the OCR models live. Defaults to `$XDG_CACHE_HOME/ocrs`. |
 | `--no-indicator` | Turns off the on-screen overlay that shows what the agent is doing. |
+| `--indicator-history <N>` | How many recent actions the overlay lists, newest on top (default 5, range 1-20). |
+| `--indicator-ttl-ms <MS>` | How long each action stays on the overlay before it disappears (default 3000, range 500-60000). |
 | `--tools <A,B>` | Exposes only these tools. |
 | `--exclude-tools <A,B>` | Hides these tools. |
 
@@ -147,13 +149,16 @@ A misspelled tool name or an invalid value stops the server at startup.
 
 ```bash
 wayland-mcp --tools doctor,screenshot,desktop_info
-wayland-mcp --exclude-tools record_start,dbus_call
+wayland-mcp --exclude-tools record_start,app_launch
 ```
 
 Each option except the tool filters can also come from an environment
 variable: `WAYLAND_MCP_PORTAL`, `WAYLAND_MCP_PORTAL_TIMEOUT_MS`,
-`WAYLAND_MCP_TOUCH_UINPUT`, `WAYLAND_MCP_OCR_DIR` and
-`WAYLAND_MCP_NO_INDICATOR`. The two on/off ones take `1`/`0` (or
+`WAYLAND_MCP_TOUCH_UINPUT`, `WAYLAND_MCP_OCR_DIR`,
+`WAYLAND_MCP_NO_INDICATOR`, `WAYLAND_MCP_INDICATOR_HISTORY` (a number,
+1-20) and `WAYLAND_MCP_INDICATOR_TTL_MS` (milliseconds, 500-60000).
+`WAYLAND_MCP_PORTAL` and `WAYLAND_MCP_NO_INDICATOR` are the on/off ones;
+they take `1`/`0` (or
 `true`/`false`, `yes`/`no`). A flag on the command line wins over its
 variable. `wayland-mcp --help` lists everything.
 

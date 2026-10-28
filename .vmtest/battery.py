@@ -188,17 +188,6 @@ after_lines = logs_until(app, "FIXTURE CLICK", None, more_than=before)
 check("trace_replay EXECUTES (count grows)", rep.get("replayed", 0) >= 1 and len(after_lines) > before, (rep, before, len(after_lines)))
 check("trace_replay missing file error", "_error" in call("trace_replay", {"path": "/nonexistent/trace.jsonl", "dry_run": True}))
 
-# --- dbus variants ---
-check("dbus arity mismatch error", "_error" in call("dbus_call", {"destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus", "method": "GetNameOwner", "signature": "ss", "args": ["only-one"]}))
-sysr = call("dbus_call", {"bus": "system", "destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus", "method": "ListNames"})
-check("dbus system bus ListNames", "_error" not in sysr and "org.freedesktop.DBus" in json.dumps(sysr), sysr)
-props = call("dbus_call", {"destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus.Properties", "method": "GetAll", "signature": "s", "args": ["org.freedesktop.DBus"]})
-check("dbus a{sv} reply decoded", "_error" not in props and isinstance(props.get("reply"), list), props)
-vset = call("dbus_call", {"destination": "org.a11y.Bus", "path": "/org/a11y/bus", "interface": "org.freedesktop.DBus.Properties", "method": "Set", "signature": "ssv", "args": ["org.a11y.Status", "IsEnabled", True]})
-check("dbus variant arg (ssv Set)", "_error" not in vset, vset)
-aas = call("dbus_call", {"destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus", "method": "GetId"})
-check("dbus no-arg call", "_error" not in aas and bool(aas.get("reply")), aas)
-
 # --- apps/targets errors + pagination ---
 check("app_launch bad binary error", "_error" in call("app_launch", {"argv": ["/nonexistent/binary-zz"]}))
 echo = call("app_launch", {"argv": ["/bin/echo", "page-test"], "wait_ms": 400})

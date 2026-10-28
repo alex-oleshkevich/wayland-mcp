@@ -43,7 +43,7 @@ python3 .vmtest/fixture_clipboard.py
 - `battery.py`: long-tail visual checks. JPEG, crop, grid, marks, cursor
   compositing, out-of-bounds pixel, diff size mismatch.
 - `battery2.py`: clipboard refusal and intact restore at 17 MiB, empty
-  clipboard, baseline/trace/record/wait error paths, `dbus_call` variants,
+  clipboard, baseline/trace/record/wait error paths,
   app and target errors, sandbox isolation.
 - `fixture_suite.py`: GTK fixture end to end. OCR, clicks, Unicode typing,
   AT-SPI set-value, paste with restore, baselines, batch validation.
@@ -98,7 +98,7 @@ switched via AccountsService). KWin's dialog is a single Allow/Deny prompt.
 | Transport | niri sandbox | 17 MiB round trip with 64 MiB lines |
 | Changes | niri sandbox | baseline regions; `wait_screen` timeout as normal result |
 | Batch / trace / recording | niri sandbox | fail-fast batch; replay executes; ffprobe-valid H.264 |
-| App / dbus / tool filter | niri sandbox, `battery2.py` | lifecycle, logs, typed `dbus_call`; unknown filters fail startup |
+| App / tool filter | niri sandbox, `battery2.py` | lifecycle, logs; unknown filters fail startup |
 | Indicator | niri sandbox | visible in recordings, hidden for captures, click-through |
 | Diagnostics | niri host | `doctor` read-only; `a11y_enable` reports pending change |
 | GNOME no consent | GNOME VM | not-enabled guidance; nothing captured or injected |

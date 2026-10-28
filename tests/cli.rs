@@ -9,6 +9,8 @@ fn cli(args: &[&str]) -> Output {
         .env_remove("WAYLAND_MCP_PORTAL")
         .env_remove("WAYLAND_MCP_TOUCH_UINPUT")
         .env_remove("WAYLAND_MCP_NO_INDICATOR")
+        .env_remove("WAYLAND_MCP_INDICATOR_HISTORY")
+        .env_remove("WAYLAND_MCP_INDICATOR_TTL_MS")
         .output()
         .expect("run wayland-mcp")
 }

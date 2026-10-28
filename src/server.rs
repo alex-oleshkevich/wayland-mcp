@@ -175,8 +175,6 @@ pub struct AppStopParams { pub app_id: String, pub timeout_ms: Option<u64> }
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AppIdParams { pub app_id: String }
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct DbusCallParams { pub destination: String, pub path: String, pub interface: String, pub method: String, pub signature: Option<String>, pub args: Option<Vec<serde_json::Value>>, pub bus: Option<String>, pub timeout_ms: Option<u64> }
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct BatchStep { pub tool: String, pub arguments: Option<serde_json::Value> }
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct BatchParams { pub steps: Vec<BatchStep>, pub stop_on_error: Option<bool> }
@@ -290,11 +288,16 @@ impl Server {
         let (x, y, _) = s.resolve_point(p.shot_id.as_deref(), p.x, p.y, &space, target_id).map_err(err)?;
         Ok((x, y))
     }
-    pub async fn with_observe(&self, mut action: serde_json::Value, observe: &Option<ObserveParams>) -> CallToolResult {
+    pub async fn with_observe(&self, action: serde_json::Value, observe: &Option<ObserveParams>) -> CallToolResult {
+        self.with_observe_label(action, observe, None).await
+    }
+    /// `with_observe` with an explicit indicator label. The label goes only to
+    /// the overlay: it is never added to the result, recorded events or traces.
+    pub async fn with_observe_label(&self, mut action: serde_json::Value, observe: &Option<ObserveParams>, label: Option<String>) -> CallToolResult {
         // Observation and indicator belong to the ACTION's target, never to
         // whatever target happens to be active.
         let target_id: Option<String> = action["target"].as_str().map(|s| s.to_string());
-        if action.get("action").is_some() { self.indicator_show(&action, target_id.as_deref()); }
+        if action.get("action").is_some() { self.indicator_show(&action, target_id.as_deref(), label.as_deref()); }
         let Some(obs) = observe else {
             if let Some(name) = action["action"].as_str().map(|s| s.to_string()) { self.record_event(&name, action.clone(), None); }
             return json_result(&action);
@@ -526,7 +529,7 @@ impl Server {
         for sb in &sandboxes { crate::apps::stop_sandbox(sb); }
     }
     /// Show the activity indicator for a dispatched action (best-effort; unavailable is reported by doctor, never faked).
-    pub fn indicator_show(&self, action: &serde_json::Value, target_id: Option<&str>) {
+    pub fn indicator_show(&self, action: &serde_json::Value, target_id: Option<&str>, label: Option<&str>) {
         if !crate::config::get().indicator { return; }
         // A recording that asked for no indicator (include_indicator:false)
         // must not have one drawn into its frames.
@@ -542,7 +545,8 @@ impl Server {
         }
         if let Some(h) = slot.as_ref() {
             let (x, y) = match (action["logical"][0].as_f64(), action["logical"][1].as_f64()) { (Some(x), Some(y)) => (Some(x), Some(y)), _ => (None, None) };
-            h.show(action["action"].as_str().unwrap_or("action"), x, y);
+            let label = label.map_or_else(|| crate::indicator::action_label(action), str::to_owned);
+            h.show(&label, x, y);
         }
     }
     /// Hide the indicator and wait for the acknowledged roundtrip before any pixel capture.
@@ -1062,7 +1066,7 @@ impl Server {
                 let dev = self.input_for_async(&target).await?;
                 let text = p.text.clone();
                 let n = tokio::task::spawn_blocking(move || { let mut d = dev.lock().unwrap(); d.type_chars(&text) }).await.map_err(|e| err(e.to_string()))?.map_err(err)?;
-                Ok(self.with_observe(serde_json::json!({"dispatched": true, "action": "type_text", "target": target.id, "route": "keys", "characters": n}), &p.observe).await)
+                Ok(self.with_observe_label(serde_json::json!({"dispatched": true, "action": "type_text", "target": target.id, "route": "keys", "characters": n}), &p.observe, Some(crate::indicator::typed_label(false, &p.text))).await)
             }
             "paste" => {
                 // Resolve the input device BEFORE touching the clipboard:
@@ -1094,7 +1098,7 @@ impl Server {
                 paste_result.map_err(err)?.map_err(err)?;
                 if let Err(e) = &restore { return Err(err(format!("paste dispatched but restoring the prior clipboard failed: {e}"))); }
                 let note = if !consumed { "no application requested the clipboard within 2000 ms after ctrl+v, so the paste likely did not land (focused widget may not accept paste, or focus is elsewhere); prior clipboard was restored anyway" } else if was_empty { "clipboard was empty before the paste; the restore re-established an empty clipboard, so the pasted text is no longer the selection" } else { "prior clipboard payloads restored after the app consumed the pasted text" };
-                Ok(self.with_observe(serde_json::json!({"dispatched": true, "action": "type_text", "target": target.id, "route": "paste", "characters": p.text.chars().count(), "paste_consumed": consumed, "clipboard_restored": restored, "clipboard_was_empty": was_empty, "note": note}), &p.observe).await)
+                Ok(self.with_observe_label(serde_json::json!({"dispatched": true, "action": "type_text", "target": target.id, "route": "paste", "characters": p.text.chars().count(), "paste_consumed": consumed, "clipboard_restored": restored, "clipboard_was_empty": was_empty, "note": note}), &p.observe, Some(crate::indicator::typed_label(true, &p.text))).await)
             }
             other => Err(err(format!("unknown type_text mode '{other}'"))),
         }
@@ -1738,23 +1742,6 @@ impl Server {
         let pid = entry.child.lock().unwrap().id();
         self.apps_lock().insert(id.clone(), Arc::new(entry));
         Ok(json_result(&serde_json::json!({"app_id": id, "pid": pid, "restarted_from": p.app_id, "target": target.id})))
-    }
-
-    /// Typed D-Bus method call on the target session bus (default), session, or system bus.
-    #[tool(description = "Typed D-Bus method call with explicit destination/path/interface/method/signature/args. Signature/args are validated before any call is emitted; invalid signatures emit no call. Defaults to the active target's session bus; bus='system' is explicit. Retains the caller's normal permissions — not a read-only sandbox.", annotations(destructive_hint = true))]
-    async fn dbus_call(&self, Parameters(p): Parameters<DbusCallParams>) -> Result<CallToolResult, ErrorData> {
-        let conn = match p.bus.as_deref().unwrap_or("target") {
-            "system" => zbus::Connection::system().await.map_err(|e| err(e.to_string()))?,
-            "session" => crate::a11y::session_connection(&None).await.map_err(err)?,
-            "target" => { let t = self.active_target(None)?; crate::a11y::session_connection(&t.session_bus).await.map_err(err)? }
-            other => return Err(err(format!("unknown bus '{other}' (expected target|session|system)"))),
-        };
-        let call = crate::dbus::call(&conn, &p.destination, &p.path, &p.interface, &p.method, p.signature.as_deref().unwrap_or(""), p.args.as_deref().unwrap_or(&[]));
-        let res = match p.timeout_ms {
-            Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms.min(60_000)), call).await.map_err(|_| err("dbus_call timed out"))?.map_err(err)?,
-            None => call.await.map_err(err)?,
-        };
-        Ok(json_result(&res))
     }
 
     /// Typed ordered action batch: fully validated before starting, sequential, per-step status.

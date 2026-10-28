@@ -75,19 +75,6 @@ check("trace_replay dry-run does not execute", other.get("dry_run") == True and 
 fp = call("frame_probe", {"duration_ms": 6000, "interval_ms": 250})
 check("frame_probe samples", len(fp.get("samples", [])) >= 3 and fp.get("pattern") == "still", fp.get("pattern"))
 
-# --- dbus variants ---
-check("dbus arity mismatch error", "_error" in call("dbus_call", {"destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus", "method": "GetNameOwner", "signature": "ss", "args": ["only-one"]}))
-sysr = call("dbus_call", {"bus": "system", "destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus", "method": "ListNames"})
-check("dbus system bus ListNames", "_error" not in sysr and "org.freedesktop.DBus" in json.dumps(sysr), sysr)
-props = call("dbus_call", {"destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus.Properties", "method": "GetAll", "signature": "s", "args": ["org.freedesktop.DBus"]})
-check("dbus a{sv} reply decoded", "_error" not in props and isinstance(props.get("reply"), list), props)
-vset = call("dbus_call", {"destination": "org.a11y.Bus", "path": "/org/a11y/bus", "interface": "org.freedesktop.DBus.Properties", "method": "Set", "signature": "ssv", "args": ["org.a11y.Status", "IsEnabled", True]})
-check("dbus variant arg (ssv Set)", "_error" not in vset, vset)
-gid = call("dbus_call", {"destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus", "method": "GetId"})
-check("dbus no-arg call", "_error" not in gid and bool(gid.get("reply")), gid)
-bad = call("dbus_call", {"destination": "org.freedesktop.DBus", "path": "/org/freedesktop/DBus", "interface": "org.freedesktop.DBus", "method": "GetNameOwner", "signature": "s", "args": [123]})
-check("dbus arg type mismatch error (no call)", "_error" in bad, bad)
-
 # --- apps/targets errors + pagination ---
 check("app_launch bad binary error", "_error" in call("app_launch", {"argv": ["/nonexistent/binary-zz"]}))
 echo = call("app_launch", {"argv": ["/bin/echo", "page-test"], "wait_ms": 400})

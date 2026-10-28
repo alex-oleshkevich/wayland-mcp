@@ -17,7 +17,7 @@ denial, and never fallen back from a private target to the host desktop.
 cargo build --release
 ./target/release/wayland-mcp                 # MCP over stdio; logs on stderr
 ./target/release/wayland-mcp --tools doctor,screenshot,desktop_info
-./target/release/wayland-mcp --exclude-tools record_start,dbus_call
+./target/release/wayland-mcp --exclude-tools record_start,app_launch
 ```
 
 Unknown names in `--tools`/`--exclude-tools` fail startup. Filtering removes
@@ -100,7 +100,7 @@ it is never rebound to a newer capture.
 | accessibility | `a11y_enable`, `a11y_tree`, `a11y_find`, `a11y_act`, `a11y_set_value` |
 | clipboard | `clipboard_read`, `clipboard_write`, `read_selection` |
 | changes | `wait_screen`, `frame_probe`, `baseline_save`, `baseline_compare` |
-| dev | `sandbox_start`, `sandbox_stop`, `target_select`, `app_launch`, `app_list`, `app_logs`, `app_stop`, `app_restart`, `wayland_globals`, `dbus_call` |
+| dev | `sandbox_start`, `sandbox_stop`, `target_select`, `app_launch`, `app_list`, `app_logs`, `app_stop`, `app_restart`, `wayland_globals` |
 | automation | `batch`, `trace_start`, `trace_stop`, `trace_replay`, `record_start`, `record_stop` |
 | diagnostics | `doctor` (read-only; never prompts, downloads, or changes settings) |
 
@@ -116,8 +116,14 @@ observation fails, both facts are reported and nothing is replayed.
   typed text is redacted to a character count. Traces/recordings can contain
   secrets and stay local until explicitly read or exported. Screenshot content
   sent as MCP images goes to the calling model provider, as with any MCP image.
-- The activity indicator (layer-shell overlay) shows the action name and
-  pointer ripple; it never has keyboard focus and never displays typed text.
+- The activity indicator (layer-shell overlay) shows a history of the last N
+  actions (`--indicator-history`, default 5), each for `--indicator-ttl-ms`
+  (default 3000) before it disappears, with their values (coordinates,
+  buttons, named keys, and the text typed with `type_text` as one `Type: ...`
+  / `Paste: ...` line); it never has keyboard focus. Typed text is therefore
+  visible on screen and in recordings with `include_indicator`; it is not added
+  to tool results, events or traces. Bare printable key presses show as `*`.
+  When typing secrets use `--no-indicator` or record with `include_indicator:false`.
   Captures hide it and wait for the compositor roundtrip acknowledgement.
   On desktops without layer-shell (e.g. GNOME without an extension, which this
   server will not install) it reports unavailable.
@@ -178,9 +184,8 @@ niri host + sandbox:
   error by default. Trace replay executes and refuses when the recorded target
   is gone. Recordings are ffprobe-valid H.264; encoder errors are reported.
 - Dev: app launch/list/logs (cursor pagination, filter, `WAYLAND_DEBUG=client`),
-  restart/stop (unknown processes refused), `dbus_call` (typed arguments,
-  `a{sv}` replies, arity/type errors emit no call, system bus works). Tool
-  filtering removes discovery and dispatch routes.
+  restart/stop (unknown processes refused). Tool filtering removes discovery
+  and dispatch routes.
 - Indicator: layer-shell overlay appears in recordings and is hidden for
   captures via acknowledged hide. Input region is empty, so it is click-through.
 - Diagnostics: `doctor` is read-only. `a11y_enable` reports the pending desktop

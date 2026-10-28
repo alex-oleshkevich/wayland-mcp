@@ -16,11 +16,15 @@ pub struct Config {
     pub ocr_dir: Option<PathBuf>,
     /// Draw the activity indicator overlay.
     pub indicator: bool,
+    /// Actions listed on the indicator, newest first.
+    pub indicator_history: usize,
+    /// How long each action stays on the indicator.
+    pub indicator_ttl_ms: u64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { portal: false, portal_timeout_ms: 150_000, touch_uinput: None, ocr_dir: None, indicator: true }
+        Self { portal: false, portal_timeout_ms: 150_000, touch_uinput: None, ocr_dir: None, indicator: true, indicator_history: 5, indicator_ttl_ms: 3000 }
     }
 }
 
