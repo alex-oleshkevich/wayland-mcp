@@ -1644,7 +1644,7 @@ impl Server {
     }
 
     /// Stop a sandbox target: owned apps/compositor/buses only.
-    #[tool(description = "Stop the sandbox target (default: active sandbox): stops only apps this server launched on it, its nested compositor and private buses; releases held input and detaches the target. Never stops host processes.", annotations(destructive_hint = true))]
+    #[tool(description = "Stop the sandbox target (default: active sandbox): stops only apps this server launched on it, its nested compositor, its private buses and every service D-Bus-activated on its private bus; releases held input and detaches the target. Never stops host processes.", annotations(destructive_hint = true))]
     async fn sandbox_stop(&self, Parameters(p): Parameters<SandboxStopParams>) -> Result<CallToolResult, ErrorData> {
         let target_id = p.target.clone().unwrap_or_else(|| self.session.lock().unwrap().active_target.clone());
         if target_id == "host" { return Err(err("sandbox_stop requires a sandbox target; the host target cannot be stopped")); }

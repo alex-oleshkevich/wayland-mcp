@@ -16,6 +16,17 @@ compiled CLI without a Wayland display: named-tool text/JSON schemas, unknown
 names and suggestions, filtered discovery, and incompatible output flags.
 The agent guide text is not snapshot-tested.
 
+Sandbox bus isolation tests are `#[ignore]`d because they start a nested
+niri and need a host niri session plus `gdbus` and `dbus-test-tool`:
+
+```bash
+cargo test apps::tests::sandbox_ -- --ignored
+```
+
+They activate a probe service on the sandbox bus and check that it runs with
+the sandbox's `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`/`NIRI_SOCKET` (no `DISPLAY`)
+and that `stop_sandbox` leaves no process on that bus.
+
 For a read-only smoke check inside a live Wayland session:
 
 ```bash

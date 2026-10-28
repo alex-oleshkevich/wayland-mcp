@@ -2,21 +2,25 @@
 //! A sandbox isolates desktop interaction (own Wayland socket, D-Bus session,
 //! accessibility bus and clipboard) — it is NOT a filesystem/network sandbox.
 use crate::{server::data_dir, wayland::TargetSpec};
-use std::{collections::{HashMap, VecDeque}, io::{BufRead, BufReader}, os::unix::process::CommandExt, process::{Child, Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
+use std::{collections::{HashMap, VecDeque}, io::{BufRead, BufReader}, os::unix::process::CommandExt, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
 
 /// Kills started child pids on drop unless disarmed (successful start).
-/// Prevents leaking niri/dbus-daemon/registryd on any error path.
-struct PidGuard(Vec<u32>);
+/// Prevents leaking niri/dbus-daemon/registryd, and anything the private bus
+/// (second field: its socket path) activated, on any error path.
+struct PidGuard(Vec<u32>, PathBuf);
 impl PidGuard {
     fn disarm(&mut self) { self.0.clear(); }
 }
 impl Drop for PidGuard {
     fn drop(&mut self) {
+        if self.0.is_empty() { return; }
+        // Bus clients first, while the bus still runs (same order as stop_sandbox).
+        stop_bus_clients(&self.1);
         for pid in &self.0 { unsafe { libc::kill(*pid as i32, libc::SIGTERM); } }
-        // Pids stay in LIVE_SANDBOX_PIDS (registered at spawn time): if a
-        // daemon ignores SIGTERM, a later shutdown sweep can still SIGKILL
-        // it, exactly as for a successfully started sandbox, whose daemons
-        // are deregistered only by stop_sandbox.
+        // Pids and the bus stay in LIVE_SANDBOX_PIDS/LIVE_SANDBOX_BUSES
+        // (registered at spawn time): if a daemon ignores SIGTERM, a later
+        // shutdown sweep can still SIGKILL it, exactly as for a successfully
+        // started sandbox, whose daemons are deregistered only by stop_sandbox.
     }
 }
 
@@ -25,9 +29,19 @@ impl Drop for PidGuard {
 /// walking the server's maps or sleeping.
 static LIVE_SANDBOX_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
+/// Socket paths of every live private sandbox bus. Processes the bus
+/// D-Bus-activated are not our children; they are found by the bus address
+/// in their environment (see `pids_on_buses`).
+static LIVE_SANDBOX_BUSES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
 fn register_sandbox_pid(pid: u32) {
     let mut live = LIVE_SANDBOX_PIDS.lock().unwrap_or_else(|e| e.into_inner());
     if !live.contains(&pid) { live.push(pid); }
+}
+
+fn register_sandbox_bus(bus: &Path) {
+    let mut live = LIVE_SANDBOX_BUSES.lock().unwrap_or_else(|e| e.into_inner());
+    if !live.iter().any(|b| b == bus) { live.push(bus.to_path_buf()); }
 }
 
 /// Set once shutdown begins: in-flight sandbox starts abort at their next
@@ -46,9 +60,72 @@ pub fn begin_sandbox_shutdown() {
     kill_live_sandboxes_now();
 }
 
-/// SIGKILL every registered sandbox daemon immediately (no waiting, no cleanup).
+/// SIGKILL every registered sandbox daemon and every process on a registered
+/// sandbox bus immediately (no waiting, no cleanup).
 pub fn kill_live_sandboxes_now() {
+    // Find bus clients before the buses die, while they are still connected.
+    let buses: Vec<PathBuf> = LIVE_SANDBOX_BUSES.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+    let clients = pids_on_buses(&buses);
     for pid in LIVE_SANDBOX_PIDS.lock().unwrap_or_else(|e| e.into_inner()).drain(..) { unsafe { libc::kill(pid as i32, libc::SIGKILL); } }
+    for pid in clients { unsafe { libc::kill(pid as i32, libc::SIGKILL); } }
+}
+
+/// Decode D-Bus address value escaping (`%xx`; other bytes are literal).
+fn unescape_bus_value(value: &str) -> Vec<u8> {
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) { out.push(hi << 4 | lo); i += 3; continue; }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Whether a D-Bus address (`;`-separated list of `transport:k=v,…`) names
+/// the unix socket `bus` exactly: path equality, never a prefix match.
+fn bus_address_names_socket(address: &str, bus: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    address.split(';').filter_map(|a| a.strip_prefix("unix:"))
+        .flat_map(|params| params.split(','))
+        .filter_map(|kv| kv.strip_prefix("path="))
+        .any(|p| unescape_bus_value(p) == bus.as_os_str().as_bytes())
+}
+
+/// Live pids (never this process) whose initial environment has a
+/// `DBUS_SESSION_BUS_ADDRESS` naming one of `buses`.
+fn pids_on_buses(buses: &[PathBuf]) -> Vec<u32> {
+    if buses.is_empty() { return Vec::new(); }
+    let me = std::process::id();
+    let Ok(dirs) = std::fs::read_dir("/proc") else { return Vec::new() };
+    dirs.flatten().filter_map(|d| {
+        let pid: u32 = d.file_name().to_str()?.parse().ok()?;
+        if pid == me { return None; }
+        let environ = std::fs::read(d.path().join("environ")).ok()?;
+        let addr = environ.split(|b| *b == 0).find_map(|e| e.strip_prefix(b"DBUS_SESSION_BUS_ADDRESS="))?;
+        let addr = std::str::from_utf8(addr).ok()?;
+        buses.iter().any(|b| bus_address_names_socket(addr, b)).then_some(pid)
+    }).collect()
+}
+
+/// SIGTERM every process on the private bus `bus`, wait briefly, SIGKILL
+/// survivors. Survivors are re-scanned rather than reused, so a pid recycled
+/// in between is signalled only if it is itself on this bus.
+fn stop_bus_clients(bus: &Path) {
+    let buses = [bus.to_path_buf()];
+    let clients = pids_on_buses(&buses);
+    if clients.is_empty() { return; }
+    for pid in &clients { unsafe { libc::kill(*pid as i32, libc::SIGTERM); } }
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if pids_on_buses(&buses).is_empty() { return; }
+    }
+    for pid in pids_on_buses(&buses) { unsafe { libc::kill(pid as i32, libc::SIGKILL); } }
+    for _ in 0..20 { if pids_on_buses(&buses).is_empty() { break; } std::thread::sleep(std::time::Duration::from_millis(50)); }
 }
 
 pub struct Sandbox {
@@ -98,6 +175,27 @@ fn spawn_log_reader<R: std::io::Read + Send + 'static>(reader: R, stream: &str, 
     });
 }
 
+/// Candidate locations of the distribution's session bus config.
+const SESSION_BUS_CONFIGS: &[&str] = &["/usr/share/dbus-1/session.conf", "/etc/dbus-1/session.conf"];
+
+fn xml_escape(s: &str) -> String { s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;") }
+
+/// Write `<dir>/bus.conf`: the standard session config (service dirs,
+/// policy, limits) plus `<dir>/services` as an extra service dir, so a
+/// sandbox-local `.service` file can be activated on the private bus.
+fn write_bus_config(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let session = SESSION_BUS_CONFIGS.iter().find(|p| std::path::Path::new(p).exists())
+        .ok_or_else(|| format!("no D-Bus session config found (looked in {SESSION_BUS_CONFIGS:?})"))?;
+    let services = dir.join("services");
+    std::fs::create_dir_all(&services).map_err(|e| format!("create sandbox service dir: {e}"))?;
+    let path = dir.join("bus.conf");
+    let body = format!(
+        "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN\"\n \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">\n<busconfig>\n  <include>{}</include>\n  <servicedir>{}</servicedir>\n</busconfig>\n",
+        xml_escape(session), xml_escape(&services.to_string_lossy()));
+    std::fs::write(&path, body).map_err(|e| format!("write sandbox bus config: {e}"))?;
+    Ok(path)
+}
+
 pub fn start_sandbox(id: &str, width: u32, height: u32) -> Result<(Sandbox, TargetSpec, String), String> {
     if sandbox_start_closed() { return Err("server is shutting down; refusing to start a sandbox that would not be registered or cleaned up".into()); }
     let niri = std::process::Command::new("which").arg("niri").output().map_err(|e| e.to_string())?;
@@ -110,19 +208,38 @@ pub fn start_sandbox(id: &str, width: u32, height: u32) -> Result<(Sandbox, Targ
     std::fs::create_dir_all(&runtime).map_err(|e| format!("create sandbox dir: {e}"))?;
     #[cfg(unix)]
     { use std::os::unix::fs::PermissionsExt; let _ = std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)); }
-    // Private D-Bus session.
-    let bus_addr = format!("unix:path={}", dir.join("bus").display());
-    let bus_child = Command::new("dbus-daemon").args(["--session", "--nofork", &format!("--address={bus_addr}")])
-        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("start private dbus-daemon: {e}"))?;
+    // Private D-Bus session: the standard session config plus a sandbox-owned
+    // service dir (dbus-daemon --session is exactly --config-file=session.conf).
+    // A session bus hands its own environment to every service it activates,
+    // so the host routing variables are removed here; the sandbox display is
+    // added via UpdateActivationEnvironment once niri is up. Until then an
+    // activation finds no display instead of escaping to the host.
+    let bus_path = dir.join("bus");
+    let bus_addr = format!("unix:path={}", bus_path.display());
+    let bus_config = write_bus_config(&dir)?;
+    let mut bus_cmd = Command::new("dbus-daemon");
+    bus_cmd.args(["--nofork", &format!("--config-file={}", bus_config.display()), &format!("--address={bus_addr}")])
+        .stdout(Stdio::null()).stderr(Stdio::null());
+    strip_sandbox_host_env(&mut bus_cmd);
+    for var in HOST_SESSION_ROUTING_ENV { bus_cmd.env_remove(var); }
+    // DBUS_SESSION_BUS_ADDRESS is removed, not set: dbus-daemon gives every
+    // service it activates on a session-type bus its own address, and the
+    // daemon must not match its own client sweep (stop_bus_clients), which
+    // has to finish before the bus is signalled.
+    bus_cmd.env("XDG_RUNTIME_DIR", &runtime).env_remove("DBUS_SESSION_BUS_ADDRESS");
+    let bus_child = bus_cmd.spawn().map_err(|e| format!("start private dbus-daemon: {e}"))?;
     let bus_pid = bus_child.id();
     // Register before anything else can fail or the process can exit: a
     // shutdown sweep (begin_sandbox_shutdown / kill_live_sandboxes_now)
-    // must find this daemon even though start_sandbox has not returned.
+    // must find this daemon (and what it activates) even though
+    // start_sandbox has not returned.
     register_sandbox_pid(bus_pid);
+    register_sandbox_bus(&bus_path);
     // Leak the handle intentionally: lifecycle is managed by pid in stop_sandbox.
     std::mem::forget(bus_child);
-    // Every early return from here kills bus/niri/a11y pids started so far.
-    let mut guard = PidGuard(vec![bus_pid]);
+    // Every early return from here stops bus clients and kills bus/niri/a11y
+    // pids started so far.
+    let mut guard = PidGuard(vec![bus_pid], bus_path.clone());
     for _ in 0..50 {
         if sandbox_start_closed() { return Err("sandbox start aborted by server shutdown".into()); }
         if dir.join("bus").exists() { break; } std::thread::sleep(std::time::Duration::from_millis(100));
@@ -173,19 +290,25 @@ pub fn start_sandbox(id: &str, width: u32, height: u32) -> Result<(Sandbox, Targ
         let log = std::fs::read_to_string(&log_path).unwrap_or_default();
         format!("nested niri did not create a Wayland socket in {:?}. Log:\n{}", runtime, log.chars().take(3000).collect::<String>())
     })?;
+    // The nested compositor's IPC socket. niri binds it before it listens on
+    // the Wayland socket, so it exists by now unless binding failed (a
+    // runtime path longer than SUN_LEN, logged in niri.log); then the sandbox
+    // simply has no IPC, as before: NIRI_SOCKET stays unset, never the host's.
+    let niri_socket = std::fs::read_dir(&runtime).ok().and_then(|entries| entries.flatten().map(|e| e.path())
+        .find(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("niri.") && n.ends_with(".sock"))));
+    let wayland_socket = runtime.join(&socket_name);
+    // From now on every service the private bus activates runs inside the sandbox.
+    let mut activation_env: Vec<(&str, &Path)> = vec![("WAYLAND_DISPLAY", &wayland_socket), ("XDG_RUNTIME_DIR", &runtime)];
+    if let Some(sock) = &niri_socket { activation_env.push(("NIRI_SOCKET", sock)); }
+    update_activation_environment(&bus_addr, &activation_env)?;
     // Ask the nested compositor for the requested mode via its IPC socket; the
     // effective geometry is always re-read and reported by the caller afterwards.
-    if let Ok(entries) = std::fs::read_dir(&runtime) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with("niri.") && name.ends_with(".sock") {
-                let _ = Command::new("niri").args(["msg", "output", "winit", "custom-mode", &width.to_string(), &height.to_string(), "60000"])
-                    .env("NIRI_SOCKET", e.path()).output();
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            }
-        }
+    if let Some(sock) = &niri_socket {
+        let _ = Command::new("niri").args(["msg", "output", "winit", "custom-mode", &width.to_string(), &height.to_string(), "60000"])
+            .env("NIRI_SOCKET", sock).output();
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    let spec = TargetSpec { id: id.to_string(), socket: runtime.join(&socket_name), session_bus: Some(bus_addr.clone()), kind: "sandbox".into() };
+    let spec = TargetSpec { id: id.to_string(), socket: wayland_socket.clone(), session_bus: Some(bus_addr.clone()), kind: "sandbox".into() };
     // Accessibility for the private bus: activating org.a11y.Bus only creates the
     // a11y bus; the registry (org.a11y.atspi root) is a separate daemon that a
     // private session does not autostart, so the sandbox owns one explicitly.
@@ -193,7 +316,14 @@ pub fn start_sandbox(id: &str, width: u32, height: u32) -> Result<(Sandbox, Targ
     let _ = Command::new("gdbus").args(["call", "--address", &bus_addr, "--dest", "org.a11y.Bus", "--object-path", "/org/a11y/bus", "--method", "org.a11y.Bus.GetAddress"]).output();
     for candidate in ["/usr/lib/at-spi2-registryd", "/usr/libexec/at-spi2-registryd", "/usr/lib/at-spi2/at-spi2-registryd"] {
         if std::path::Path::new(candidate).exists() {
-            if let Ok(child) = Command::new(candidate).env("DBUS_SESSION_BUS_ADDRESS", &bus_addr).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            let mut registryd = Command::new(candidate);
+            strip_sandbox_host_env(&mut registryd);
+            for var in HOST_SESSION_ROUTING_ENV { registryd.env_remove(var); }
+            registryd.env("DBUS_SESSION_BUS_ADDRESS", &bus_addr).env("WAYLAND_DISPLAY", &wayland_socket).env("XDG_RUNTIME_DIR", &runtime);
+            if let Some(sock) = &niri_socket { registryd.env("NIRI_SOCKET", sock); }
+            registryd
+                .stdout(Stdio::null()).stderr(Stdio::null());
+            if let Ok(child) = registryd.spawn() {
                 a11y_pid = Some(child.id());
                 register_sandbox_pid(child.id());
                 guard.0.push(child.id());
@@ -216,13 +346,86 @@ pub fn stop_sandbox(sb: &Sandbox) {
     std::thread::sleep(std::time::Duration::from_millis(300));
     unsafe {
         if libc::kill(sb.niri_pid as i32, 0) == 0 { libc::kill(sb.niri_pid as i32, libc::SIGKILL); }
+    }
+    // Everything on this sandbox's bus (activated services, the a11y bus and
+    // registry, leftover clients) before the bus itself goes away.
+    let bus_path = sb.dir.join("bus");
+    stop_bus_clients(&bus_path);
+    unsafe {
         if let Some(pid) = sb.bus_pid { libc::kill(pid as i32, libc::SIGTERM); }
         if let Some(pid) = sb.a11y_pid { libc::kill(pid as i32, libc::SIGTERM); }
     }
     // Deregister only after every daemon has been signalled, so a forced exit
     // arriving mid-stop still finds them.
     LIVE_SANDBOX_PIDS.lock().unwrap_or_else(|e| e.into_inner()).retain(|p| *p != sb.niri_pid && Some(*p) != sb.bus_pid && Some(*p) != sb.a11y_pid);
+    LIVE_SANDBOX_BUSES.lock().unwrap_or_else(|e| e.into_inner()).retain(|b| *b != bus_path);
+    unmount_fuse_under(&sb.dir);
     let _ = std::fs::remove_dir_all(&sb.dir);
+}
+
+/// Decode a /proc/self/mountinfo path field (`\ooo` octal escapes).
+fn unescape_mountinfo(field: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    let oct = |c: u8| (b'0'..=b'7').contains(&c).then(|| c - b'0');
+    let b = field.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 3 < b.len() {
+            if let (Some(x), Some(y), Some(z)) = (oct(b[i + 1]), oct(b[i + 2]), oct(b[i + 3])) {
+                out.push(x.wrapping_shl(6) | y << 3 | z);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
+}
+
+/// Lazily unmount FUSE mounts under `dir`, deepest first. Services the
+/// sandbox bus activated mount into the sandbox runtime dir
+/// (xdg-document-portal: runtime/doc, gvfsd-fuse: runtime/gvfs); when they
+/// are SIGKILLed (shutdown sweep, unresponsive service) the mount stays
+/// behind as a dead endpoint and would block removing the sandbox dir.
+fn unmount_fuse_under(dir: &Path) {
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else { return };
+    let mut mounts: Vec<PathBuf> = info.lines().filter_map(|line| {
+        let (pre, post) = line.split_once(" - ")?;
+        if !post.split(' ').next()?.starts_with("fuse") { return None; }
+        let target = unescape_mountinfo(pre.split(' ').nth(4)?);
+        target.starts_with(dir).then_some(target)
+    }).collect();
+    mounts.sort_by_key(|m| std::cmp::Reverse(m.components().count()));
+    for target in mounts {
+        for tool in ["fusermount3", "fusermount"] {
+            if Command::new(tool).arg("-u").arg("-z").arg(&target).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok() { break; }
+        }
+    }
+}
+
+/// Host session-routing variables (beyond SANDBOX_STRIPPED_ENV) that must not
+/// reach anything the private bus activates: they point at the host
+/// compositor and its IPC.
+const HOST_SESSION_ROUTING_ENV: &[&str] = &["WAYLAND_DISPLAY", "NIRI_SOCKET", "HYPRLAND_INSTANCE_SIGNATURE", "SWAYSOCK"];
+
+/// GVariant text-format string literal.
+fn gvariant_string(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// Add `vars` to the environment the bus at `bus_addr` gives activated services.
+fn update_activation_environment(bus_addr: &str, vars: &[(&str, &Path)]) -> Result<(), String> {
+    let mut entries = Vec::with_capacity(vars.len());
+    for (k, v) in vars {
+        let v = v.to_str().ok_or_else(|| format!("sandbox path for {k} is not UTF-8: {v:?}"))?;
+        entries.push(format!("{}: {}", gvariant_string(k), gvariant_string(v)));
+    }
+    let out = Command::new("gdbus").args(["call", "--address", bus_addr, "--dest", "org.freedesktop.DBus", "--object-path", "/org/freedesktop/DBus", "--method", "org.freedesktop.DBus.UpdateActivationEnvironment", &format!("{{{}}}", entries.join(", "))])
+        .output().map_err(|e| format!("run gdbus for UpdateActivationEnvironment: {e}"))?;
+    if !out.status.success() { return Err(format!("set the sandbox bus activation environment (UpdateActivationEnvironment) failed: {}", String::from_utf8_lossy(&out.stderr).trim())); }
+    Ok(())
 }
 
 /// Host display-routing variables stripped for sandbox launches. The nested
@@ -349,9 +552,83 @@ mod tests {
     }
 
     #[test]
+    fn bus_address_matches_socket_path_exactly() {
+        let bus = Path::new("/d/sandboxes/s 1/bus");
+        assert!(bus_address_names_socket("unix:path=/d/sandboxes/s%201/bus,guid=abc", bus));
+        assert!(bus_address_names_socket("tcp:host=x;unix:path=/d/sandboxes/s 1/bus", bus));
+        assert!(!bus_address_names_socket("unix:path=/d/sandboxes/s 1/bus2", bus), "prefix must not match");
+        assert!(!bus_address_names_socket("unix:path=/d/sandboxes/s 1", bus));
+        assert!(!bus_address_names_socket("unix:abstract=/d/sandboxes/s 1/bus", bus));
+        assert!(!bus_address_names_socket("unix:path=/d/sandboxes/s%2", bus), "truncated escape stays literal");
+    }
+
+    #[test]
     fn live_group_members_exclude_zombies_and_other_groups() {
         let entries = [(10, 'S', 10), (11, 'R', 10), (12, 'Z', 10), (13, 'S', 99)];
         assert_eq!(select_live_group_members(&entries, 10), vec![10, 11]);
         assert!(select_live_group_members(&entries, 42).is_empty());
+    }
+
+    /// Install `org.example.EnvProbe` on the sandbox's own service dir and
+    /// activate it through the sandbox bus. The probe records its pid and
+    /// environment, claims the name, and (like a real service that does not
+    /// exit on bus disconnect) keeps running until signalled.
+    fn activate_env_probe(sb: &Sandbox, bus_addr: &str) -> (u32, HashMap<String, String>) {
+        let out = sb.dir.join("envprobe.env");
+        let script = sb.dir.join("envprobe.sh");
+        std::fs::write(&script, format!(
+            "#!/bin/sh\n{{ echo \"PROBE_PID=$$\"; env; }} > '{out}.tmp' && mv '{out}.tmp' '{out}'\ndbus-test-tool black-hole --name=org.example.EnvProbe &\nexec sleep infinity\n",
+            out = out.display())).unwrap();
+        { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+        std::fs::write(sb.dir.join("services/org.example.EnvProbe.service"), format!("[D-BUS Service]\nName=org.example.EnvProbe\nExec={}\n", script.display())).unwrap();
+        let bus_call = |method: &str, args: &[&str]| Command::new("gdbus").args(["call", "--address", bus_addr, "--dest", "org.freedesktop.DBus", "--object-path", "/org/freedesktop/DBus", "--method", method]).args(args).output().unwrap();
+        let reload = bus_call("org.freedesktop.DBus.ReloadConfig", &[]);
+        assert!(reload.status.success(), "ReloadConfig: {}", String::from_utf8_lossy(&reload.stderr));
+        let started = bus_call("org.freedesktop.DBus.StartServiceByName", &["org.example.EnvProbe", "0"]);
+        assert!(started.status.success(), "StartServiceByName: {}", String::from_utf8_lossy(&started.stderr));
+        for _ in 0..50 { if out.exists() { break; } std::thread::sleep(std::time::Duration::from_millis(100)); }
+        let env: HashMap<String, String> = std::fs::read_to_string(&out).expect("probe wrote its environment")
+            .lines().filter_map(|l| l.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        (env["PROBE_PID"].parse().unwrap(), env)
+    }
+
+    /// Pids whose environment names exactly this bus socket (independent of
+    /// the production matcher: plain `unix:path=<bus>` with an optional
+    /// `,key=value` suffix).
+    fn host_pids_on_bus(bus_addr: &str) -> Vec<u32> {
+        let want = format!("DBUS_SESSION_BUS_ADDRESS={bus_addr}");
+        std::fs::read_dir("/proc").unwrap().flatten().filter_map(|d| {
+            let pid: u32 = d.file_name().to_str()?.parse().ok()?;
+            let environ = std::fs::read(d.path().join("environ")).ok()?;
+            environ.split(|b| *b == 0).map(String::from_utf8_lossy)
+                .any(|e| e == want || e.starts_with(&format!("{want},"))).then_some(pid)
+        }).collect()
+    }
+
+    #[test]
+    #[ignore = "needs a host niri session (TESTING.md)"]
+    fn sandbox_bus_activates_services_inside_the_sandbox() {
+        // Short ids: niri's IPC socket path under runtime/ must fit SUN_LEN.
+        let (sb, spec, bus_addr) = start_sandbox(&format!("envp-a-{}", std::process::id()), 640, 480).unwrap();
+        let (_pid, env) = activate_env_probe(&sb, &bus_addr);
+        stop_sandbox(&sb);
+        // Compare only the routing variables: the full environment holds secrets.
+        let runtime = sb.dir.join("runtime");
+        let routing = ["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DISPLAY"].map(|k| env.get(k).cloned());
+        assert_eq!(routing, [Some(spec.socket.to_string_lossy().into_owned()), Some(runtime.to_string_lossy().into_owned()), None]);
+        let niri_socket = env.get("NIRI_SOCKET").map(std::path::PathBuf::from);
+        assert_eq!(niri_socket.as_deref().and_then(Path::parent), Some(runtime.as_path()), "NIRI_SOCKET must be the nested compositor's");
+    }
+
+    #[test]
+    #[ignore = "needs a host niri session (TESTING.md)"]
+    fn sandbox_stop_stops_bus_activated_services() {
+        let (sb, _spec, bus_addr) = start_sandbox(&format!("envp-b-{}", std::process::id()), 640, 480).unwrap();
+        let (pid, _env) = activate_env_probe(&sb, &bus_addr);
+        assert!(host_pids_on_bus(&bus_addr).contains(&pid), "probe must be on the sandbox bus before stop");
+        stop_sandbox(&sb);
+        let survivors = host_pids_on_bus(&bus_addr);
+        for p in &survivors { unsafe { libc::kill(*p as i32, libc::SIGKILL); } }
+        assert!(survivors.is_empty(), "processes still on the stopped sandbox bus: {survivors:?}");
     }
 }

@@ -76,10 +76,13 @@ install the agent skill with `npx skills add alex-oleshkevich/wayland-mcp`.
 - `host`: the desktop the server was started on (`WAYLAND_DISPLAY`).
 - `sandbox-N`: created by `sandbox_start` — a nested **niri** compositor with a
   private Wayland socket, private D-Bus session, accessibility bus and
-  clipboard. It isolates desktop interaction only; it is **not** a
-  filesystem/network sandbox. Requires the `niri` executable; no other
-  compositor is substituted. `target_select` switches explicitly; there is no
-  automatic fallback from an unavailable sandbox to the host.
+  clipboard. Services the private bus activates (portals, a11y bus, desktop
+  daemons) run with the sandbox's `WAYLAND_DISPLAY`, `NIRI_SOCKET` and
+  `XDG_RUNTIME_DIR`, never the host's, and are stopped with the sandbox. It
+  isolates desktop interaction only; it is **not** a filesystem/network
+  sandbox. Requires the `niri` executable; no other compositor is
+  substituted. `target_select` switches explicitly; there is no automatic
+  fallback from an unavailable sandbox to the host.
 
 ## Coordinate contract
 
